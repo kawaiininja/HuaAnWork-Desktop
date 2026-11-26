@@ -4,13 +4,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Worker } from 'node:worker_threads'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createKnowledgeHost } from '../../src/huaanwork-host/knowledge/host.ts'
 import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
 import { createKnowledgeStorageClient } from '../../src/huaanwork-host/knowledge/storage-client.ts'
 import { KNOWLEDGE_TEST_CORRUPT_AFTER_COMMIT } from '../../src/huaanwork-host/knowledge/storage-protocol.ts'
 import { MAX_KNOWLEDGE_BASES } from '../../src/huaanwork-host/knowledge/types.ts'
 import { neutralKnowledgeRootPath, neutralKnowledgeWikiRootPath } from '../../src/huaanwork-host/workspace-state.ts'
+
+const lifecycleTempDirs: string[] = []
+function makeLifecycleTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  lifecycleTempDirs.push(dir)
+  return dir
+}
 
 interface PersistedKnowledgeBase {
   readonly id: string
@@ -26,6 +33,9 @@ function readRegistryRecords(profileDir: string): PersistedKnowledgeBase[] {
 }
 
 describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, stale stat, and 1s dispose', () => {
+  afterEach(() => {
+    for (const dir of lifecycleTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
   it('stays lazy with zero Workers when no KBs are registered and disposes immediately', async () => {
     const profileDir = mkdtempSync(join(tmpdir(), 'kb-host-lazy-'))
     const host = createKnowledgeHost({ profileDir })
@@ -164,15 +174,10 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
       await host.dispose()
       writeFileSync(join(neutralKnowledgeRootPath(profileDir, kb.id), 'index.sqlite'), 'CORRUPT_BYTES')
 
-      let failWikiOnce = true
+      // 控制器裁决 M-1：跨线程只传布尔钩子，故障由 Storage Worker 在 VITEST 下自行注入（M-6 清理误导性死闭包）。
       const host2 = createKnowledgeHost({
         profileDir,
-        failWikiResetOnceForTest: () => {
-          if (failWikiOnce) {
-            failWikiOnce = false
-            throw new Error('simulated-ebusy-wiki-rename')
-          }
-        },
+        failWikiResetOnceForTest: () => {},
       })
       await host2.start()
       try {
@@ -195,9 +200,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
       // 4. Post-commit reopen failure keeps new index.sqlite (no rollback) and marks phase index-error
       const host3 = createKnowledgeHost({
         profileDir,
-        afterCommitBeforeReopenForTest: () => {
-          writeFileSync(join(neutralKnowledgeRootPath(profileDir, kb.id), 'index.sqlite'), 'CORRUPT_POST_COMMIT')
-        },
+        afterCommitBeforeReopenForTest: () => {},
       })
       await host3.start()
       try {
@@ -481,9 +484,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
     writeFileSync(join(neutralKnowledgeRootPath(profileDir, kbId), 'index.sqlite'), 'CORRUPT_DB_BYTES')
     const host2 = createKnowledgeHost({
       profileDir,
-      failWikiResetOnceForTest: () => {
-        throw new Error('simulated-ebusy-wiki-reset')
-      },
+      failWikiResetOnceForTest: () => {},
     })
     await host2.start()
     try {
@@ -626,6 +627,115 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
         expect(host.get(kb.id)).toBeUndefined()
         expect(readRegistryRecords(profileDir).some(r => r.id === kb.id)).toBe(false)
       }
+    } finally {
+      await host.dispose()
+    }
+  })
+
+  it('guards start()/create()/dispose() races (I-1), serializes concurrent create + update(sourceDir) overlap (I-5), and fixes multi-KB search / chmod-000 sourceUnavailable / non-blocking resumeWatch (I-9)', async () => {
+    const root = realpathSync(makeLifecycleTempDir('kb-host-i1-i5-i9-'))
+    const profileDir = join(root, 'profile')
+    const dirA = join(root, 'docs-a')
+    const dirB = join(root, 'docs-b')
+    const parentOverlap = join(root, 'overlap-parent')
+    const childOverlap = join(parentOverlap, 'child')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(dirA, { recursive: true })
+    mkdirSync(dirB, { recursive: true })
+    mkdirSync(childOverlap, { recursive: true })
+    writeFileSync(join(dirA, 'a.md'), '健康库内容 唯一词条')
+    writeFileSync(join(dirB, 'b.md'), '另一库内容')
+
+    const storage = createKnowledgeStorageClient()
+    const host = createKnowledgeHost({ profileDir, storageOverrideForTest: storage })
+    try {
+      // I-1：并发 start() 与 create() 绝不覆盖新创建的记录。
+      const [_, kbA] = await Promise.all([
+        host.start(),
+        host.create({ name: '库A', sourceDir: dirA }),
+      ])
+      expect(host.get(kbA.id)?.id).toBe(kbA.id)
+      const kbB = await host.create({ name: '库B', sourceDir: dirB })
+      await host.update(kbA.id, { watchPaused: true })
+      await host.update(kbB.id, { watchPaused: true })
+      await host.sync(kbA.id)
+      await host.sync(kbB.id)
+
+      // I-5：并发 create(childOverlap) 与 update(kbB, { sourceDir: parentOverlap }) 经共享 bindingChain 串行，
+      // 最多只有一方成功，磁盘上绝不会落盘父子重叠源目录。
+      const raceResults = await Promise.allSettled([
+        host.update(kbB.id, { sourceDir: parentOverlap }),
+        host.create({ name: '子目录库', sourceDir: childOverlap }),
+      ])
+      const fulfilledCount = raceResults.filter(r => r.status === 'fulfilled').length
+      expect(fulfilledCount).toBe(1)
+      const persistedAfterRace = readRegistryRecords(profileDir)
+      const hasParent = persistedAfterRace.some(r => r.sourceDir === parentOverlap)
+      const hasChild = persistedAfterRace.some(r => r.sourceDir === childOverlap)
+      expect(hasParent && hasChild).toBe(false)
+
+      // I-9：多库检索「健康库 0 命中 + 另一库报错」返回 [] 而不是抛错，且去重重复 kbIds。
+      const searchSpy = vi.spyOn(storage, 'searchFts').mockImplementation(async (kbId, kbName, q, limit) => {
+        if (kbId === kbB.id) throw new Error('index-error: simulated broken kb')
+        return await Object.getPrototypeOf(storage)?.searchFts?.call(storage, kbId, kbName, q, limit)
+          ?? []
+      })
+      try {
+        const res = await host.search({ kbIds: [kbA.id, kbA.id, kbB.id], query: '完全不命中的关键词' })
+        expect(res).toEqual([])
+        // kbA 去重后只查询了一次。
+        expect(searchSpy.mock.calls.filter(call => call[0] === kbA.id)).toHaveLength(1)
+      } finally {
+        searchSpy.mockRestore()
+      }
+
+      // I-9：onSystemResume 委托给引擎，handleSystemResume 触发一次且返回有效取消函数。
+      const resumeSpy = vi.fn()
+      const unsub = host.onSystemResume(resumeSpy)
+      await host.handleSystemResume()
+      expect(resumeSpy).toHaveBeenCalledTimes(1)
+      unsub()
+      await host.handleSystemResume()
+      expect(resumeSpy).toHaveBeenCalledTimes(1)
+
+      // I-9：update({ watchPaused: false }) 先持久化 watchPaused: false 再异步后台对账，立即释放维护状态。
+      const resumed = await host.update(kbA.id, { watchPaused: false })
+      expect(resumed.watchPaused).toBe(false)
+      expect(readRegistryRecords(profileDir).find(r => r.id === kbA.id)).toBeDefined()
+
+      // I-9：chmod 000 不可读源目录时，search 与 getChunk 报 sourceUnavailable: true, stale: false。
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        const hitBefore = await host.search({ kbIds: [kbA.id], query: '健康库内容' })
+        expect(hitBefore).toHaveLength(1)
+        chmodSync(dirA, 0o000)
+        try {
+          const hitNoPerm = await host.search({ kbIds: [kbA.id], query: '健康库内容' })
+          expect(hitNoPerm[0]).toMatchObject({ sourceUnavailable: true, stale: false })
+          const chunkNoPerm = await host.getChunk({ kbId: kbA.id, docId: hitBefore[0]!.docId, ordinal: 0 })
+          expect(chunkNoPerm).toMatchObject({ status: 'ok', sourceUnavailable: true, stale: false })
+        } finally {
+          chmodSync(dirA, 0o700)
+        }
+      }
+
+      // I-1：create() 在 startKb 失败回滚时，不残留僵尸 runtime / 目录。
+      const openSpy = vi.spyOn(storage, 'openKb').mockRejectedValueOnce(new Error('simulated-open-crash'))
+      const dirFail = join(root, 'docs-fail')
+      mkdirSync(dirFail, { recursive: true })
+      try {
+        await expect(host.create({ name: '失败库', sourceDir: dirFail })).rejects.toThrow(/simulated-open-crash/u)
+      } finally {
+        openSpy.mockRestore()
+      }
+      expect((await host.list()).some(k => k.name === '失败库')).toBe(false)
+
+      // I-1：dispose() 之后所有写操作显式报 knowledge-base-busy。
+      await host.dispose()
+      await expect(host.create({ name: '退场后', sourceDir: dirFail })).rejects.toThrow(/knowledge-base-busy/u)
+      await expect(host.update(kbA.id, { name: '退场后' })).rejects.toThrow(/knowledge-base-busy/u)
+      await expect(host.remove(kbA.id)).rejects.toThrow(/knowledge-base-busy/u)
+      await expect(host.sync(kbA.id)).rejects.toThrow(/knowledge-base-busy/u)
+      await expect(host.rebuild(kbA.id)).rejects.toThrow(/knowledge-base-busy/u)
     } finally {
       await host.dispose()
     }

@@ -14,7 +14,7 @@
  * `import type`，相对导入保留 `.ts` 后缀。
  */
 
-import { tokenizeForFts } from './tokenizer.ts'
+import { stripFtsOperators, tokenizeForFts } from './tokenizer.ts'
 import type { ChunkLocator } from './types.ts'
 
 const RERANK_POOL_SIZE = 60
@@ -55,9 +55,9 @@ function containsPhrase(content: string, phrase: string): boolean {
   return phrase !== '' && content.toLowerCase().includes(phrase)
 }
 
-/** 查询去重词表；分词复用 `tokenizeForFts`，与索引口径一致。 */
+/** 查询去重词表；剥离 FTS5 运算符后复用 `tokenizeForFts`，与索引口径一致（M-5）。 */
 function queryTerms(rawQuery: string): string[] {
-  return [...new Set(tokenizeForFts(rawQuery).split(' ').filter((term) => term !== ''))]
+  return [...new Set(tokenizeForFts(stripFtsOperators(rawQuery)).split(' ').filter((term) => term !== ''))]
 }
 
 /**
@@ -93,6 +93,7 @@ export function rerankSingleKbCandidates(
   rawQuery: string,
   limit: number = RERANK_DEFAULT_LIMIT,
 ): SingleKbCandidate[] {
+  const effectiveLimit = Number.isFinite(limit) ? Math.floor(limit) : RERANK_DEFAULT_LIMIT
   const phrase = normalizedPhrase(rawQuery)
   const terms = queryTerms(rawQuery)
   const pool = candidates.slice(0, RERANK_POOL_SIZE).map((candidate, index) => ({
@@ -103,7 +104,7 @@ export function rerankSingleKbCandidates(
       - RERANK_PROXIMITY_BONUS * proximityScore(candidate.content, terms),
   }))
   pool.sort((left, right) => left.score - right.score || left.index - right.index)
-  const take = Math.max(0, Math.min(limit, pool.length))
+  const take = Math.max(0, Math.min(effectiveLimit, pool.length))
   return pool.slice(0, take).map((entry) => entry.candidate)
 }
 
@@ -116,7 +117,8 @@ export function mergeMultiKbResults(
   rawQuery: string,
   topK: number = MULTI_KB_DEFAULT_TOP_K,
 ): Array<SingleKbCandidate & { score: number }> {
-  const cap = Math.max(1, Math.min(topK, MULTI_KB_MAX_TOP_K))
+  const effectiveTopK = Number.isFinite(topK) ? Math.floor(topK) : MULTI_KB_DEFAULT_TOP_K
+  const cap = Math.max(1, Math.min(effectiveTopK, MULTI_KB_MAX_TOP_K))
   const phrase = normalizedPhrase(rawQuery)
   const scored: Array<{ candidate: SingleKbCandidate; score: number; order: number }> = []
   let order = 0

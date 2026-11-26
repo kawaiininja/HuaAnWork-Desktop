@@ -300,9 +300,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         `[knowledge] host start failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       )
     })
-    const desktopRuntime = ctx.desktopRuntime as SystemResumeRuntime
+    const desktopRuntime = ctx.desktopRuntime as SystemResumeRuntime | undefined
     let unsubscribeSystemResume: (() => void) | undefined
-    if (typeof desktopRuntime.subscribeSystemResume === 'function') {
+    if (typeof desktopRuntime?.subscribeSystemResume === 'function') {
       try {
         const release = desktopRuntime.subscribeSystemResume(() => {
           void knowledgeHost.handleSystemResume().catch((cause: unknown) => {
@@ -319,8 +319,11 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
       }
     }
     return async () => {
-      unsubscribeSystemResume?.()
-      await knowledgeHost.dispose()
+      try {
+        unsubscribeSystemResume?.()
+      } finally {
+        await knowledgeHost.dispose()
+      }
     }
   }, 'huaanwork: knowledge host')
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;

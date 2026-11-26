@@ -31,9 +31,6 @@ import { applySectionTextBudget, decodeHtmlEntities } from './text.ts'
 type AdmZipEntry = AdmZip.IZipEntry
 
 const OLE2_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])
-const ZIP_EOCD_SIG = 0x06054b50
-const ZIP_EOCD_SIZE = 22
-const ZIP_MAX_COMMENT_BYTES = 0xffff
 const ZIP_METHOD_STORED = 0
 const ZIP_METHOD_DEFLATED = 8
 const ZIP_METHOD_WINZIP_AES = 99
@@ -137,31 +134,181 @@ function errorDocument(base: DocumentBase, reason: string): ExtractedDocument {
   }
 }
 
-/** 提取所有 `<t>` / `<a:t>` 文本片段并反转义 XML 实体。 */
-function collectTextRuns(xml: string, tagPattern: RegExp): string {
+interface XmlElementMatch {
+  readonly attrs: string
+  readonly body: string
+  readonly selfClosing: boolean
+}
+
+function isXmlWhitespace(code: number): boolean {
+  return code === 32 || code === 9 || code === 13 || code === 10
+}
+
+function isTagNameBoundary(code: number): boolean {
+  return isXmlWhitespace(code) || code === 62 /* '>' */ || code === 47 /* '/' */
+}
+
+/**
+ * 线性定位开始标签的 `>`（跳过单/双引号属性值中的 `/` 与 `>`），并判定是否自闭合。
+ */
+function findTagOpenEnd(xml: string, afterNamePos: number): { readonly end: number; readonly selfClosing: boolean } {
+  let quote = 0
+  for (let index = afterNamePos; index < xml.length; index += 1) {
+    const code = xml.charCodeAt(index)
+    if (quote !== 0) {
+      if (code === quote) quote = 0
+      continue
+    }
+    if (code === 34 /* '"' */ || code === 39 /* '\'' */) {
+      quote = code
+      continue
+    }
+    if (code === 62 /* '>' */) {
+      let prev = index - 1
+      while (prev >= afterNamePos && isXmlWhitespace(xml.charCodeAt(prev))) prev -= 1
+      return { end: index, selfClosing: prev >= afterNamePos && xml.charCodeAt(prev) === 47 /* '/' */ }
+    }
+  }
+  return { end: -1, selfClosing: false }
+}
+
+/** 线性查找 `</tagName>`（允许闭合标签名与 `>` 之间存在空白）。 */
+function findClosingTag(
+  xml: string,
+  closePrefix: string,
+  fromIndex: number,
+): { readonly contentEnd: number; readonly tagEnd: number } | null {
+  let pos = fromIndex
+  while (pos < xml.length) {
+    const idx = xml.indexOf(closePrefix, pos)
+    if (idx === -1) return null
+    let after = idx + closePrefix.length
+    while (after < xml.length && isXmlWhitespace(xml.charCodeAt(after))) after += 1
+    if (after < xml.length && xml.charCodeAt(after) === 62 /* '>' */) {
+      return { contentEnd: idx, tagEnd: after + 1 }
+    }
+    pos = idx + closePrefix.length
+  }
+  return null
+}
+
+/**
+ * O(N) 线性扫描指定 XML 标签（C-3 + I-8 修复）：
+ * - 正确识别自闭合标签（`<c r="A1" s="3"/>`、`<row/>`、`<w:t/>`），绝不跨标签吞噬后续兄弟节点；
+ * - 遇未闭合恶意标签时 `findClosingTag` 首次返回 `null` 即退出，彻底消除 O(N²) 正则回溯 DoS。
+ */
+function* iterateXmlElements(xml: string, tagName: string): Generator<XmlElementMatch> {
+  const openPrefix = `<${tagName}`
+  const closePrefix = `</${tagName}`
+  let pos = 0
+  while (pos < xml.length) {
+    const openIdx = xml.indexOf(openPrefix, pos)
+    if (openIdx === -1) break
+    const afterName = openIdx + openPrefix.length
+    if (afterName >= xml.length || !isTagNameBoundary(xml.charCodeAt(afterName))) {
+      pos = afterName
+      continue
+    }
+    const { end: openEnd, selfClosing } = findTagOpenEnd(xml, afterName)
+    if (openEnd === -1) break
+    const attrsEnd = selfClosing
+      ? xml.lastIndexOf('/', openEnd - 1)
+      : openEnd
+    const attrs = attrsEnd > afterName ? xml.slice(afterName, attrsEnd) : ''
+    if (selfClosing) {
+      yield { attrs, body: '', selfClosing: true }
+      pos = openEnd + 1
+      continue
+    }
+    const close = findClosingTag(xml, closePrefix, openEnd + 1)
+    if (close === null) break
+    yield { attrs, body: xml.slice(openEnd + 1, close.contentEnd), selfClosing: false }
+    pos = close.tagEnd
+  }
+}
+
+/** 提取指定标签名（如 `a:t` / `t`）的全部文本片段并反转义 XML 实体。 */
+function collectTagTexts(xml: string, tagName: string): string {
   const parts: string[] = []
-  for (const match of xml.matchAll(tagPattern)) {
-    parts.push(decodeHtmlEntities(match[1] ?? ''))
+  for (const el of iterateXmlElements(xml, tagName)) {
+    if (!el.selfClosing && el.body !== '') parts.push(decodeHtmlEntities(el.body))
   }
   return parts.join('')
 }
 
-const WORD_TEXT_RUN = /<w:t\b[^>]*>([\s\S]*?)<\/w:t\s*>/gu
-const WORD_PARAGRAPH = /<w:p\b[^>]*>([\s\S]*?)<\/w:p\s*>/gu
-const WORD_SELF_CLOSING_PARAGRAPH = /<w:p\b[^>]*\/>/gu
-const DRAWING_TEXT_RUN = /<a:t\b[^>]*>([\s\S]*?)<\/a:t\s*>/gu
-const DRAWING_PARAGRAPH = /<a:p\b[^>]*>([\s\S]*?)<\/a:p\s*>/gu
-const DRAWING_SELF_CLOSING_PARAGRAPH = /<a:p\b[^>]*\/>/gu
-const SHEET_ROW = /<row\b[^>]*>([\s\S]*?)<\/row\s*>/gu
-const SHEET_CELL = /<c\b([^>]*)>([\s\S]*?)<\/c\s*>/gu
-const CELL_VALUE = /<v\b[^>]*>([\s\S]*?)<\/v\s*>/u
-const INLINE_STRING = /<is\b[^>]*>([\s\S]*?)<\/is\s*>/u
-const INLINE_STRING_TEXT = /<t\b[^>]*>([\s\S]*?)<\/t\s*>/u
-const SHARED_STRING_ITEM = /<si\b[^>]*>([\s\S]*?)<\/si\s*>/gu
-const SHARED_STRING_TEXT = /<t\b[^>]*>([\s\S]*?)<\/t\s*>/gu
-const WORKBOOK_SHEET = /<sheet\b[^>]*>/gu
-const SHEET_NAME_ATTR = /\bname="([^"]*)"/u
-const CELL_TYPE_ATTR = /\bt="([^"]*)"/u
+/**
+ * 按文档顺序单遍扫描 Word 段落中的 `<w:t>`、`<w:tab/>`、`<w:br/>` / `<w:cr/>`（I-8 修复）：
+ * 只对 `<w:t>` 正文解码实体，真实制表符与软换行原位输出，且绝不误改字面文本 `&lt;w:br/&gt;`。
+ */
+function extractWordParagraphText(xml: string): string {
+  const parts: string[] = []
+  let pos = 0
+  while (pos < xml.length) {
+    const idx = xml.indexOf('<w:', pos)
+    if (idx === -1) break
+    const afterPrefix = idx + 3
+    // 识别 `<w:t`、`<w:tab`、`<w:br`、`<w:cr`
+    if (xml.startsWith('t', afterPrefix) && afterPrefix + 1 < xml.length && isTagNameBoundary(xml.charCodeAt(afterPrefix + 1))) {
+      const { end: openEnd, selfClosing } = findTagOpenEnd(xml, afterPrefix + 1)
+      if (openEnd === -1) break
+      if (selfClosing) {
+        pos = openEnd + 1
+        continue
+      }
+      const close = findClosingTag(xml, '</w:t', openEnd + 1)
+      if (close === null) break
+      if (close.contentEnd > openEnd + 1) {
+        parts.push(decodeHtmlEntities(xml.slice(openEnd + 1, close.contentEnd)))
+      }
+      pos = close.tagEnd
+      continue
+    }
+    if (xml.startsWith('tab', afterPrefix) && afterPrefix + 3 < xml.length && isTagNameBoundary(xml.charCodeAt(afterPrefix + 3))) {
+      const { end: openEnd, selfClosing } = findTagOpenEnd(xml, afterPrefix + 3)
+      if (openEnd === -1) break
+      parts.push('\t')
+      if (selfClosing) {
+        pos = openEnd + 1
+      } else {
+        const close = findClosingTag(xml, '</w:tab', openEnd + 1)
+        pos = close === null ? openEnd + 1 : close.tagEnd
+      }
+      continue
+    }
+    if (
+      (xml.startsWith('br', afterPrefix) || xml.startsWith('cr', afterPrefix))
+      && afterPrefix + 2 < xml.length
+      && isTagNameBoundary(xml.charCodeAt(afterPrefix + 2))
+    ) {
+      const tag = xml.slice(afterPrefix, afterPrefix + 2)
+      const { end: openEnd, selfClosing } = findTagOpenEnd(xml, afterPrefix + 2)
+      if (openEnd === -1) break
+      parts.push('\n')
+      if (selfClosing) {
+        pos = openEnd + 1
+      } else {
+        const close = findClosingTag(xml, `</w:${tag}`, openEnd + 1)
+        pos = close === null ? openEnd + 1 : close.tagEnd
+      }
+      continue
+    }
+    pos = afterPrefix
+  }
+  return parts.join('')
+}
+
+const ATTR_NAME = /(?:^|\s)name\s*=\s*(?:"([^"]*)"|'([^']*)')/u
+const ATTR_RID = /(?:^|\s)r:id\s*=\s*(?:"([^"]*)"|'([^']*)')/u
+const ATTR_ID = /(?:^|\s)Id\s*=\s*(?:"([^"]*)"|'([^']*)')/u
+const ATTR_TARGET = /(?:^|\s)Target\s*=\s*(?:"([^"]*)"|'([^']*)')/u
+const ATTR_CELL_TYPE = /(?:^|\s)t\s*=\s*(?:"([^"]*)"|'([^']*)')/u
+const ATTR_ROW_NUM = /(?:^|\s)r\s*=\s*(?:"(\d+)"|'(\d+)')/u
+
+function readXmlAttr(attrs: string, pattern: RegExp): string | undefined {
+  const match = pattern.exec(attrs)
+  if (match === null) return undefined
+  return match[1] ?? match[2]
+}
 
 /** ZIP 条目名与目标路径的比较统一按 `/` 分隔（ZIP 规范只允许 `/`）。 */
 function isTargetName(name: string, candidate: string): boolean {
@@ -249,17 +396,16 @@ function extractDocx(
       ? errorDocument(base, 'corrupt-archive')
       : skippedDocument(base, read.reason)
   }
-  const xml = read.xml.replace(WORD_SELF_CLOSING_PARAGRAPH, '<w:p></w:p>')
   const paragraphs: string[] = []
-  for (const match of xml.matchAll(WORD_PARAGRAPH)) {
-    const body = match[1] ?? ''
-    const line = collectTextRuns(body, WORD_TEXT_RUN)
-      .replace(/<w:tab\b[^>]*\/>/gu, '\t')
-      .replace(/<w:br\b[^>]*\/>/gu, '\n')
-    paragraphs.push(line)
+  for (const paragraph of iterateXmlElements(read.xml, 'w:p')) {
+    if (paragraph.selfClosing) {
+      paragraphs.push('')
+      continue
+    }
+    paragraphs.push(extractWordParagraphText(paragraph.body))
   }
   if (paragraphs.length === 0) {
-    const fallback = collectTextRuns(xml, WORD_TEXT_RUN)
+    const fallback = extractWordParagraphText(read.xml)
     if (fallback.trim() !== '') paragraphs.push(...fallback.split('\n'))
   }
   const drafts: SectionDraft[] = chunkLines(paragraphs, DOCX_SECTION_PARAGRAPHS)
@@ -281,48 +427,112 @@ function extractDocx(
 
 function parseSharedStrings(
   entries: readonly AdmZipEntry[],
+  totalInflated: number,
 ): { ok: true; items: string[]; totalInflated: number } | { ok: false; reason: OoxmlSkipReason } {
   const entry = findEntry(entries, 'xl/sharedStrings.xml')
-  if (entry === undefined) return { ok: true, items: [], totalInflated: 0 }
-  const read = readXmlEntry(entry, 0)
+  if (entry === undefined) return { ok: true, items: [], totalInflated }
+  const read = readXmlEntry(entry, totalInflated)
   if (!read.ok) return { ok: false, reason: read.reason }
   const items: string[] = []
-  for (const item of read.xml.matchAll(SHARED_STRING_ITEM)) {
-    items.push(collectTextRuns(item[1] ?? '', SHARED_STRING_TEXT))
+  for (const item of iterateXmlElements(read.xml, 'si')) {
+    items.push(item.selfClosing ? '' : collectTagTexts(item.body, 't'))
   }
   return { ok: true, items, totalInflated: read.totalInflated }
 }
 
-function parseSheetNames(
-  entries: readonly AdmZipEntry[],
-): { names: string[]; totalInflated: number } {
-  const entry = findEntry(entries, 'xl/workbook.xml')
-  if (entry === undefined) return { names: [], totalInflated: 0 }
-  const read = readXmlEntry(entry, 0)
-  if (!read.ok) return { names: [], totalInflated: 0 }
-  const names: string[] = []
-  for (const match of read.xml.matchAll(WORKBOOK_SHEET)) {
-    const name = SHEET_NAME_ATTR.exec(match[0])
-    if (name !== null) names.push(decodeHtmlEntities(name[1] ?? ''))
+/** 将 `workbook.xml.rels` 的 Target 规范化成 ZIP 条目路径（相对 `xl/` 或根路径）。 */
+function resolveWorkbookRelTarget(rawTarget: string): string {
+  const cleaned = rawTarget.replace(/\\/gu, '/').replace(/^\/+/u, '')
+  const segments = (cleaned.startsWith('xl/') ? cleaned : `xl/${cleaned}`).split('/')
+  const resolved: string[] = []
+  for (const segment of segments) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      resolved.pop()
+      continue
+    }
+    resolved.push(segment)
   }
-  return { names, totalInflated: read.totalInflated }
+  return resolved.join('/')
+}
+
+interface ParsedWorkbookSheets {
+  readonly ok: true
+  readonly orderedNames: string[]
+  readonly nameByEntryPath: ReadonlyMap<string, string>
+  readonly totalInflated: number
+}
+
+/**
+ * 解析 `xl/workbook.xml`（及可选 `xl/_rels/workbook.xml.rels`）：
+ * 传递累计解压预算，错误不再静默吞掉（I-8），并按 `r:id` 精确映射工作表名（M-5）。
+ */
+function parseWorkbookSheets(
+  entries: readonly AdmZipEntry[],
+  totalInflated: number,
+): ParsedWorkbookSheets | { readonly ok: false; readonly reason: OoxmlSkipReason } {
+  let inflated = totalInflated
+  const relTargets = new Map<string, string>()
+  const relsEntry = findEntry(entries, 'xl/_rels/workbook.xml.rels')
+  if (relsEntry !== undefined) {
+    const relsRead = readXmlEntry(relsEntry, inflated)
+    if (!relsRead.ok) return { ok: false, reason: relsRead.reason }
+    inflated = relsRead.totalInflated
+    for (const rel of iterateXmlElements(relsRead.xml, 'Relationship')) {
+      const id = readXmlAttr(rel.attrs, ATTR_ID)
+      const target = readXmlAttr(rel.attrs, ATTR_TARGET)
+      if (id !== undefined && target !== undefined) {
+        relTargets.set(decodeHtmlEntities(id), resolveWorkbookRelTarget(decodeHtmlEntities(target)))
+      }
+    }
+  }
+
+  const entry = findEntry(entries, 'xl/workbook.xml')
+  if (entry === undefined) {
+    return { ok: true, orderedNames: [], nameByEntryPath: new Map(), totalInflated: inflated }
+  }
+  const read = readXmlEntry(entry, inflated)
+  if (!read.ok) return { ok: false, reason: read.reason }
+  inflated = read.totalInflated
+
+  const orderedNames: string[] = []
+  const nameByEntryPath = new Map<string, string>()
+  for (const sheet of iterateXmlElements(read.xml, 'sheet')) {
+    const rawName = readXmlAttr(sheet.attrs, ATTR_NAME)
+    if (rawName === undefined) continue
+    const decodedName = decodeHtmlEntities(rawName)
+    orderedNames.push(decodedName)
+    const rId = readXmlAttr(sheet.attrs, ATTR_RID)
+    if (rId !== undefined) {
+      const targetPath = relTargets.get(decodeHtmlEntities(rId))
+      if (targetPath !== undefined) nameByEntryPath.set(targetPath, decodedName)
+    }
+  }
+  return { ok: true, orderedNames, nameByEntryPath, totalInflated: inflated }
 }
 
 function resolveCellValue(attributes: string, body: string, sharedStrings: readonly string[]): string {
-  const type = CELL_TYPE_ATTR.exec(attributes)
-  const inline = INLINE_STRING.exec(body)
-  if (inline !== null) {
-    const text = INLINE_STRING_TEXT.exec(inline[1] ?? '')
-    return decodeHtmlEntities(text?.[1] ?? '')
+  if (body === '') return ''
+  const cellType = readXmlAttr(attributes, ATTR_CELL_TYPE)
+  for (const inline of iterateXmlElements(body, 'is')) {
+    if (!inline.selfClosing) return collectTagTexts(inline.body, 't')
+    return ''
   }
-  const value = CELL_VALUE.exec(body)
-  if (value === null) return ''
-  const rawValue = decodeHtmlEntities(value[1] ?? '')
-  if (type !== null && type[1] === 's') {
-    const sharedIndex = Number.parseInt(rawValue, 10)
-    return Number.isFinite(sharedIndex) ? (sharedStrings[sharedIndex] ?? '') : ''
+  for (const valueEl of iterateXmlElements(body, 'v')) {
+    if (valueEl.selfClosing) return ''
+    const rawValue = decodeHtmlEntities(valueEl.body)
+    if (cellType === 's') {
+      const sharedIndex = Number.parseInt(rawValue, 10)
+      return Number.isFinite(sharedIndex) ? (sharedStrings[sharedIndex] ?? '') : ''
+    }
+    return rawValue
   }
-  return rawValue
+  return ''
+}
+
+interface SheetRowDraft {
+  readonly rowNumber: number
+  readonly text: string
 }
 
 function extractXlsx(
@@ -331,20 +541,23 @@ function extractXlsx(
   maxDocTextBytes: number,
   totalInflated: number,
 ): ExtractedDocument {
-  const shared = parseSharedStrings(entries)
+  const shared = parseSharedStrings(entries, totalInflated)
   if (!shared.ok) {
     return shared.reason === 'corrupt-archive'
       ? errorDocument(base, 'corrupt-archive')
       : skippedDocument(base, shared.reason)
   }
-  const sheetNameInfo = parseSheetNames(entries)
-  const sheetNames = sheetNameInfo.names
+  const workbook = parseWorkbookSheets(entries, shared.totalInflated)
+  if (!workbook.ok) {
+    return workbook.reason === 'corrupt-archive'
+      ? errorDocument(base, 'corrupt-archive')
+      : skippedDocument(base, workbook.reason)
+  }
   const worksheets = sortedMatches(entries, /^xl\/worksheets\/sheet(\d+)\.xml$/u)
   if (worksheets.length === 0) return errorDocument(base, 'corrupt-archive')
 
   const drafts: SectionDraft[] = []
-  // 共享字符串与工作簿元数据同样计入 ZIP 解压总量（规格 §2.3）。
-  let inflated = totalInflated + shared.totalInflated + sheetNameInfo.totalInflated
+  let inflated = workbook.totalInflated
   for (let sheetIndex = 0; sheetIndex < worksheets.length; sheetIndex += 1) {
     const current = worksheets[sheetIndex]
     if (current === undefined) continue
@@ -355,30 +568,45 @@ function extractXlsx(
         : skippedDocument(base, read.reason)
     }
     inflated = read.totalInflated
-    const sheetName = sheetNames[sheetIndex] ?? `Sheet${current.index}`
-    const rows: string[] = []
-    for (const rowMatch of read.xml.matchAll(SHEET_ROW)) {
+    const normalizedEntryName = current.entry.entryName.replace(/\\/gu, '/')
+    const sheetName = workbook.nameByEntryPath.get(normalizedEntryName)
+      ?? workbook.orderedNames[sheetIndex]
+      ?? `Sheet${current.index}`
+    const rows: SheetRowDraft[] = []
+    let fallbackRowNumber = 0
+    for (const rowEl of iterateXmlElements(read.xml, 'row')) {
+      fallbackRowNumber += 1
+      const rawRowNum = readXmlAttr(rowEl.attrs, ATTR_ROW_NUM)
+      const parsedRowNum = rawRowNum === undefined ? Number.NaN : Number.parseInt(rawRowNum, 10)
+      const rowNumber = Number.isFinite(parsedRowNum) && parsedRowNum > 0 ? parsedRowNum : fallbackRowNumber
+      if (rowEl.selfClosing) {
+        rows.push({ rowNumber, text: '' })
+        continue
+      }
       const cells: string[] = []
-      for (const cellMatch of (rowMatch[1] ?? '').matchAll(SHEET_CELL)) {
-        const value = resolveCellValue(cellMatch[1] ?? '', cellMatch[2] ?? '', shared.items)
+      for (const cellEl of iterateXmlElements(rowEl.body, 'c')) {
+        if (cellEl.selfClosing) continue
+        const value = resolveCellValue(cellEl.attrs, cellEl.body, shared.items)
         if (value !== '') cells.push(value)
       }
-      rows.push(cells.join('\t'))
+      rows.push({ rowNumber, text: cells.join('\t') })
     }
-    const headerRow = rows[0] ?? ''
-    const windows = chunkLines(rows, XLSX_SECTION_ROWS)
-    for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
-      const window = windows[windowIndex] ?? []
-      if (window.every(line => line.trim() === '')) continue
+    const headerRow = rows[0]?.text ?? ''
+    for (let start = 0; start < rows.length; start += XLSX_SECTION_ROWS) {
+      const slice = rows.slice(start, start + XLSX_SECTION_ROWS)
+      const lines = slice.map(row => row.text)
+      if (lines.every(line => line.trim() === '')) continue
+      const rowStart = slice[0]?.rowNumber ?? (start + 1)
+      const rowEnd = slice[slice.length - 1]?.rowNumber ?? (start + slice.length)
       drafts.push({
         headingPath: sheetName,
         locator: {
           kind: 'sheet',
           sheet: sheetName,
-          rowStart: windowIndex * XLSX_SECTION_ROWS + 1,
-          rowEnd: windowIndex * XLSX_SECTION_ROWS + window.length,
+          rowStart,
+          rowEnd,
         },
-        lines: window,
+        lines,
         ...(headerRow === '' ? {} : { headerRow }),
       })
     }
@@ -413,13 +641,12 @@ function extractPptx(
         : skippedDocument(base, read.reason)
     }
     inflated = read.totalInflated
-    const xml = read.xml.replace(DRAWING_SELF_CLOSING_PARAGRAPH, '<a:p></a:p>')
     const paragraphs: string[] = []
-    for (const paragraph of xml.matchAll(DRAWING_PARAGRAPH)) {
-      paragraphs.push(collectTextRuns(paragraph[1] ?? '', DRAWING_TEXT_RUN))
+    for (const paragraph of iterateXmlElements(read.xml, 'a:p')) {
+      paragraphs.push(paragraph.selfClosing ? '' : collectTagTexts(paragraph.body, 'a:t'))
     }
     if (paragraphs.length === 0) {
-      const fallback = collectTextRuns(xml, DRAWING_TEXT_RUN)
+      const fallback = collectTagTexts(read.xml, 'a:t')
       if (fallback.trim() !== '') paragraphs.push(fallback)
     }
     drafts.push({
@@ -439,20 +666,6 @@ function extractPptx(
   }
 }
 
-/**
- * 在中央目录解析前读取 EOCD 声明的条目总数：恶意超多条目 ZIP 的中央目录
- * 解析本身就会产生大量对象，先按声明的计数 fail-closed 更省内存。真实
- * 计数仍在 `getEntries()` 后复核一次。
- */
-function declaredZipEntryCount(buffer: Buffer): number | undefined {
-  const earliest = Math.max(0, buffer.byteLength - ZIP_EOCD_SIZE - ZIP_MAX_COMMENT_BYTES)
-  for (let index = buffer.byteLength - ZIP_EOCD_SIZE; index >= earliest; index -= 1) {
-    if (buffer.readUInt32LE(index) !== ZIP_EOCD_SIG) continue
-    return buffer.readUInt16LE(index + 10)
-  }
-  return undefined
-}
-
 /** 提取一份 .docx / .xlsx / .pptx。所有异常都收敛为 `skipped` / `error` 结果。 */
 export function extractOoxmlDocument(input: OoxmlExtractionInput): ExtractedDocument {
   const ext = input.ext.toLowerCase()
@@ -460,14 +673,18 @@ export function extractOoxmlDocument(input: OoxmlExtractionInput): ExtractedDocu
   if (input.buffer.byteLength >= OLE2_MAGIC.byteLength && input.buffer.subarray(0, OLE2_MAGIC.byteLength).equals(OLE2_MAGIC)) {
     return skippedDocument(base, 'encrypted')
   }
-  const declaredEntries = declaredZipEntryCount(input.buffer)
-  if (declaredEntries !== undefined && declaredEntries > MAX_ZIP_ENTRIES) {
-    return skippedDocument(base, 'zip-limit-exceeded')
-  }
   let entries: AdmZipEntry[]
   try {
-    entries = new AdmZip(input.buffer).getEntries()
-  } catch (error) {
+    const zip = new AdmZip(input.buffer)
+    // O(1) 读取 ZIP64 感知的条目数（ENDSUB），在 `getEntries()` 分配数组前拦截恶意条目炸弹（I-8）。
+    const declaredEntries = typeof (zip as { getEntryCount?: unknown }).getEntryCount === 'function'
+      ? (zip as { getEntryCount(): number }).getEntryCount()
+      : undefined
+    if (declaredEntries !== undefined && declaredEntries > MAX_ZIP_ENTRIES) {
+      return skippedDocument(base, 'zip-limit-exceeded')
+    }
+    entries = zip.getEntries()
+  } catch {
     return errorDocument(base, 'corrupt-archive')
   }
   if (entries.length > MAX_ZIP_ENTRIES) return skippedDocument(base, 'zip-limit-exceeded')

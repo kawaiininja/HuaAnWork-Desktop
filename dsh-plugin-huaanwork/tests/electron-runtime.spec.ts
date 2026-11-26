@@ -562,15 +562,25 @@ describe('Electron desktop runtime', () => {
     const runtime = new ElectronDesktopRuntime(async () => {})
     const listener = vi.fn()
 
-    const release = runtime.subscribeSystemResume(listener)
-    expect(electron.powerMonitor.on).toHaveBeenCalledWith('resume', listener)
+    const releaseFirst = runtime.subscribeSystemResume(listener)
+    expect(electron.powerMonitor.on).toHaveBeenCalledWith('resume', expect.any(Function))
+    const firstHandler = electron.powerMonitor.on.mock.calls[0]?.[1]
     electron.powerMonitor.emit('resume')
-    expect(listener).toHaveBeenCalledOnce()
+    expect(listener).toHaveBeenCalledTimes(1)
 
-    release()
-    expect(electron.powerMonitor.off).toHaveBeenCalledWith('resume', listener)
+    releaseFirst()
+    expect(electron.powerMonitor.off).toHaveBeenCalledTimes(1)
+    expect(electron.powerMonitor.off).toHaveBeenCalledWith('resume', firstHandler)
+    // I-10 回归：重复调用取消函数必须是真正 no-op，不能再调 off，也不能误杀随后用同一 listener 建立的新订阅。
+    const releaseSecond = runtime.subscribeSystemResume(listener)
+    releaseFirst()
+    expect(electron.powerMonitor.off).toHaveBeenCalledTimes(1)
     electron.powerMonitor.emit('resume')
-    expect(listener).toHaveBeenCalledOnce()
+    expect(listener).toHaveBeenCalledTimes(2)
+
+    releaseSecond()
+    electron.powerMonitor.emit('resume')
+    expect(listener).toHaveBeenCalledTimes(2)
   })
 
   it('uses the independent macOS compatibility frame, Dock icon, and template tray image', async () => {

@@ -39,16 +39,33 @@ export interface DetectCloudPlaceholderOptions {
   readonly readWin32Attributes?: (filePath: string) => number | undefined
 }
 
-/** 默认属性读取器：惰性加载 `koffi`，只绑定一次。 */
-let cachedAttributeReader: ((filePath: string) => number) | undefined
+const WIN32_LONG_PATH_THRESHOLD = 248
 
-function win32AttributeReader(): (filePath: string) => number {
-  cachedAttributeReader ??= (() => {
+/**
+ * Windows `GetFileAttributesW` 对 ≥248 字符路径不带 `\\?\` 会失败返回
+ * `INVALID_FILE_ATTRIBUTES`，导致深层 OneDrive 占位文件被误判为探针不可用
+ * 进而触发云下载（I-9 修复）。
+ */
+export function formatWin32AttributesPath(filePath: string): string {
+  if (filePath.length < WIN32_LONG_PATH_THRESHOLD) return filePath
+  if (filePath.startsWith('\\\\?\\') || filePath.startsWith('\\\\.\\')) return filePath
+  if (!/^[A-Za-z]:[\\/]/u.test(filePath)) return filePath
+  return `\\\\?\\${filePath.replace(/\//gu, '\\')}`
+}
+
+/** 默认属性读取器：惰性加载 `koffi`，成功与失败均只尝试一次（M-5 缓存失败哨兵）。 */
+let cachedAttributeReader: ((filePath: string) => number) | null | undefined
+
+function win32AttributeReader(): ((filePath: string) => number) | null {
+  if (cachedAttributeReader !== undefined) return cachedAttributeReader
+  try {
     const koffi = createRequire(import.meta.url)('koffi') as typeof import('koffi').default
     const kernel32 = koffi.load('kernel32.dll')
     const getFileAttributesW = kernel32.func('uint32 __stdcall GetFileAttributesW(str16)')
-    return (filePath: string): number => getFileAttributesW(filePath) as number
-  })()
+    cachedAttributeReader = (filePath: string): number => getFileAttributesW(filePath) as number
+  } catch {
+    cachedAttributeReader = null
+  }
   return cachedAttributeReader
 }
 
@@ -66,7 +83,8 @@ export function detectCloudPlaceholder(
   if (platform !== 'win32') return 'probe-unavailable'
   try {
     const read = opts.readWin32Attributes ?? win32AttributeReader()
-    const attributes = read(filePath)
+    if (read === null) return 'probe-unavailable'
+    const attributes = read(formatWin32AttributesPath(filePath))
     if (attributes === undefined || !Number.isFinite(attributes)) return 'probe-unavailable'
     // koffi 的 `uint32` 返回值在 JS 中是 0..2^32-1；`0xFFFFFFFF` 表示调用失败。
     if ((attributes >>> 0) === WIN32_INVALID_FILE_ATTRIBUTES) return 'probe-unavailable'

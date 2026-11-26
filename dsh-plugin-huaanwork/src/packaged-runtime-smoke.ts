@@ -140,24 +140,21 @@ async function smokeDiagnosticExportWorker(): Promise<void> {
 export async function smokeKnowledgeWorkers(): Promise<void> {
   const installRoot = fileURLToPath(new URL('./', installAnchor))
   const pdfPackageRoot = join(installRoot, 'node_modules', 'pdfjs-dist')
+  const cmapsDir = join(pdfPackageRoot, 'cmaps')
+  const standardFontsDir = join(pdfPackageRoot, 'standard_fonts')
   assert(
-    existsSync(join(pdfPackageRoot, 'cmaps')),
-    'is missing node_modules/pdfjs-dist/cmaps for Chinese CID PDF extraction',
+    existsSync(cmapsDir) && readdirSync(cmapsDir).length > 0,
+    'is missing non-empty node_modules/pdfjs-dist/cmaps for Chinese CID PDF extraction',
   )
   assert(
-    existsSync(join(pdfPackageRoot, 'standard_fonts')),
-    'is missing node_modules/pdfjs-dist/standard_fonts for PDF text extraction',
+    existsSync(standardFontsDir) && readdirSync(standardFontsDir).length > 0,
+    'is missing non-empty node_modules/pdfjs-dist/standard_fonts for PDF text extraction',
   )
-  const napiRsRoot = join(installRoot, 'node_modules', '@napi-rs')
-  if (existsSync(napiRsRoot)) {
-    const leakedCanvasFiles = readdirSync(napiRsRoot)
-      .filter(name => name === 'canvas' || name.startsWith('canvas-'))
-      .reduce((total, name) => total + measurePackagedTree(join(napiRsRoot, name)).files, 0)
-    assert(
-      leakedCanvasFiles === 0,
-      `packaged app unexpectedly shipped ${String(leakedCanvasFiles)} file(s) under node_modules/@napi-rs/canvas*`,
-    )
-  }
+  const leakedCanvasPaths = findLeakedCanvasPackages(join(installRoot, 'node_modules'))
+  assert(
+    leakedCanvasPaths.length === 0,
+    `packaged app unexpectedly shipped @napi-rs/canvas* entries: ${leakedCanvasPaths.join(', ')}`,
+  )
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-packaged-knowledge-'))
   const sourceDir = join(root, 'source')
@@ -173,6 +170,7 @@ export async function smokeKnowledgeWorkers(): Promise<void> {
     workerUrl: resolveKnowledgeWorkerUrl('extraction-worker'),
   })
   let disposeMs = 0
+  let disposeResults: PromiseSettledResult<void>[] = []
   try {
     const opened = await storage.openKb('packaged-smoke', kbDir)
     assert(opened.ok, `could not open the packaged knowledge index: ${opened.ok ? '' : opened.error}`)
@@ -219,10 +217,17 @@ export async function smokeKnowledgeWorkers(): Promise<void> {
     )
   } finally {
     const disposeStart = performance.now()
-    await Promise.allSettled([storage.dispose(), pool.dispose()])
+    disposeResults = await Promise.allSettled([storage.dispose(), pool.dispose()])
     disposeMs = performance.now() - disposeStart
     rmSync(root, { recursive: true, force: true })
   }
+  const disposeFailures = disposeResults
+    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    .map(result => String(result.reason))
+  assert(
+    disposeFailures.length === 0,
+    `knowledge workers dispose rejected: ${disposeFailures.join('; ')}`,
+  )
   assert(
     disposeMs < 1_000,
     `knowledge workers dispose took ${disposeMs.toFixed(1)} ms (budget 1,000 ms)`,
@@ -230,19 +235,68 @@ export async function smokeKnowledgeWorkers(): Promise<void> {
 
   try {
     const measured = measurePackagedTree(installRoot)
-    const canvasBytes = existsSync(napiRsRoot)
-      ? readdirSync(napiRsRoot)
-          .filter(name => name === 'canvas' || name.startsWith('canvas-'))
-          .reduce((total, name) => total + measurePackagedTree(join(napiRsRoot, name)).bytes, 0)
-      : 0
     process.stderr.write(
       `[knowledge-smoke] package files=${String(measured.files)} bytes=${String(measured.bytes)} `
-      + `canvasBytes=${String(canvasBytes)} disposeMs=${disposeMs.toFixed(1)}\n`,
+      + `canvasBytes=0 disposeMs=${disposeMs.toFixed(1)}\n`,
     )
   } catch (error) {
     // 体积观察绝不影响冒烟结论。
     process.stderr.write(`[knowledge-smoke] package measurement skipped: ${String(error)}\n`)
   }
+}
+
+/** 递归排查安装目录全部 `node_modules`（含嵌套）是否泄漏 `@napi-rs/canvas*`。 */
+function findLeakedCanvasPackages(rootNodeModules: string): string[] {
+  if (!existsSync(rootNodeModules)) return []
+  const leaked: string[] = []
+  const queue: string[] = [rootNodeModules]
+  while (queue.length > 0) {
+    const nodeModulesDir = queue.pop()
+    if (nodeModulesDir === undefined) break
+    let entries: string[]
+    try {
+      entries = readdirSync(nodeModulesDir)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.startsWith('.')) continue
+      const entryPath = join(nodeModulesDir, entry)
+      if (entry === '@napi-rs') {
+        let scopedEntries: string[]
+        try {
+          scopedEntries = readdirSync(entryPath)
+        } catch {
+          continue
+        }
+        for (const scoped of scopedEntries) {
+          if (scoped === 'canvas' || scoped.startsWith('canvas-')) {
+            leaked.push(join(entryPath, scoped))
+          } else {
+            const nested = join(entryPath, scoped, 'node_modules')
+            if (existsSync(nested)) queue.push(nested)
+          }
+        }
+        continue
+      }
+      if (entry.startsWith('@')) {
+        let scopedEntries: string[]
+        try {
+          scopedEntries = readdirSync(entryPath)
+        } catch {
+          continue
+        }
+        for (const scoped of scopedEntries) {
+          const nested = join(entryPath, scoped, 'node_modules')
+          if (existsSync(nested)) queue.push(nested)
+        }
+        continue
+      }
+      const nested = join(entryPath, 'node_modules')
+      if (existsSync(nested)) queue.push(nested)
+    }
+  }
+  return leaked
 }
 
 /** 有限深度的包体积观察（只统计普通文件；符号链接/ASAR 虚拟项跳过）。 */

@@ -24,7 +24,7 @@
  */
 
 import { R_OK } from 'node:constants'
-import { watch } from 'node:fs'
+import { existsSync, watch } from 'node:fs'
 import { access, lstat, mkdir } from 'node:fs/promises'
 import { extname, isAbsolute, join } from 'node:path'
 
@@ -33,7 +33,7 @@ import type { CloudPlaceholderState } from './cloud-placeholder.ts'
 import { appendKnowledgeEvent } from './events.ts'
 import type { AppendKnowledgeEventInput } from './events.ts'
 import { computeExtractConfigHash } from './extractors/extract-config.ts'
-import { probeCaseSensitiveDir } from './paths.ts'
+import { foldAsciiPath, probeCaseSensitiveDir } from './paths.ts'
 import { readKnowledgeBases } from './registry.ts'
 import { walkSourceDirectory } from './safe-read.ts'
 import type { WalkedSourceFile } from './safe-read.ts'
@@ -70,7 +70,7 @@ const CLOUD_DEHYDRATED_REASON = 'cloud-placeholder-dehydrated'
 const FILE_TOO_LARGE_REASON = 'file-too-large'
 const MAX_FILES_EXCEEDED_REASON = 'max-files-exceeded'
 
-const IGNORED_FILE_NAMES: ReadonlySet<string> = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini'])
+const IGNORED_FILE_NAMES: ReadonlySet<string> = new Set(['.ds_store', 'thumbs.db', 'desktop.ini'])
 const IGNORED_DIRECTORY_NAMES: ReadonlySet<string> = new Set(['.git', 'node_modules', '__pycache__', '.hg', '.svn'])
 const IGNORED_FILE_SUFFIXES: readonly string[] = ['.tmp', '.part', '.crdownload']
 
@@ -137,7 +137,7 @@ export interface KnowledgeSyncEngine {
    */
   shutdownKbForDelete(kbId: string): Promise<void>
   pauseWatch(kbId: string): Promise<void>
-  resumeWatch(kbId: string): Promise<void>
+  resumeWatch(kbId: string, opts?: { readonly awaitReconcile?: boolean }): Promise<void>
   syncNow(kbId: string): Promise<void>
   /**
    * 重绑源目录运行态收敛（规格 §6.4；控制器终审裁决：注册表唯一写者为 Host）。
@@ -184,6 +184,7 @@ interface Runtime {
   dirtyPaths: Set<string>
   debounceTimer: NodeJS.Timeout | undefined
   staggerCancels: Set<() => void>
+  stableCancels: Set<() => void>
   lastSyncedAt?: string
   lastError?: string
   chain: Promise<void>
@@ -193,12 +194,12 @@ interface Runtime {
   metrics: { fullRechunkCount: number; periodicReconcileCount: number }
 }
 
-/** 目录遍历的内置忽略规则（规格 §6.1）。 */
+/** 目录遍历的内置忽略规则（规格 §6.1；文件名按小写比较覆盖 Windows `Desktop.ini`/`THUMBS.DB`，M-4）。 */
 function shouldIgnoreSourceEntry(_relPath: string, name: string, isDir: boolean): boolean {
   if (isDir) return IGNORED_DIRECTORY_NAMES.has(name)
-  if (IGNORED_FILE_NAMES.has(name)) return true
-  if (name.startsWith('~$')) return true
   const lower = name.toLowerCase()
+  if (IGNORED_FILE_NAMES.has(lower)) return true
+  if (name.startsWith('~$')) return true
   return IGNORED_FILE_SUFFIXES.some(suffix => lower.endsWith(suffix))
 }
 
@@ -290,6 +291,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   const cancelOrganizerForKb = opts.cancelOrganizerForKb
 
   const runtimes = new Map<string, Runtime>()
+  const startInFlight = new Map<string, Promise<void>>()
   const locks = new Map<string, { readonly mode: 'maintain' | 'delete' }>()
   const listeners = new Set<() => void>()
   const staggerTimers = new Set<NodeJS.Timeout>()
@@ -336,6 +338,12 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
   }
 
+  /** 仅在 runtime 仍存活时追加事件，防止异步 watcher 错误或晚到回调复活已删除的库目录（I-1）。 */
+  async function appendRuntimeEvent(runtime: Runtime, input: AppendKnowledgeEventInput): Promise<void> {
+    if (!isRuntimeLive(runtime)) return
+    await appendEvent(kbDirOf(runtime.record.id), input)
+  }
+
   function closeWatcher(runtime: Runtime): void {
     const watcher = runtime.watcher
     runtime.watcher = undefined
@@ -361,6 +369,31 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   function cancelRuntimeStaggerTimers(runtime: Runtime): void {
     for (const cancel of [...runtime.staggerCancels]) cancel()
     runtime.staggerCancels.clear()
+  }
+
+  function cancelRuntimeStableTimers(runtime: Runtime): void {
+    for (const cancel of [...runtime.stableCancels]) cancel()
+    runtime.stableCancels.clear()
+  }
+
+  function waitCancellableStable(runtime: Runtime, delayMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        runtime.stableCancels.delete(cancel)
+        resolve(true)
+      }, delayMs)
+      const cancel = (): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        runtime.stableCancels.delete(cancel)
+        resolve(false)
+      }
+      runtime.stableCancels.add(cancel)
+    })
   }
 
   function scheduleRuntimeStagger(
@@ -390,14 +423,25 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   }
 
   function ensureWatcher(runtime: Runtime): void {
-    if (!isRuntimeLive(runtime) || runtime.watchPaused || runtime.sourceUnavailable || runtime.maintaining || locks.has(runtime.record.id)) return
+    // C-5 修复：`index-error` 恢复态不重新挂起 Watcher。
+    if (
+      !isRuntimeLive(runtime)
+      || runtime.watchPaused
+      || runtime.sourceUnavailable
+      || runtime.maintaining
+      || runtime.phase === 'index-error'
+      || locks.has(runtime.record.id)
+    ) return
     if (runtime.watcher !== undefined) return
     try {
       const watcher = watchFactory(runtime.record.sourceDir)
       watcher.on('change', (_eventType: string, filename: string | Buffer | null) => {
+        // M-4：忽略已关闭旧 Watcher 晚到的事件。
+        if (runtime.watcher !== watcher) return
         onWatcherEvent(runtime, filename)
       })
       watcher.on('error', (error: Error) => {
+        if (runtime.watcher !== watcher) return
         onWatcherError(runtime, error)
       })
       runtime.watcher = watcher
@@ -406,7 +450,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       runtime.watchFailed = true
       runtime.lastError = describeError(error)
       settlePhase(runtime)
-      void appendEvent(kbDirOf(runtime.record.id), {
+      void appendRuntimeEvent(runtime, {
         kind: 'watch_failed',
         level: 'warn',
         summary: `文件监听不可用，已降级为定时/手动同步: ${describeError(error)}`,
@@ -419,7 +463,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtime.watchFailed = true
     runtime.lastError = describeError(error)
     settlePhase(runtime)
-    void appendEvent(kbDirOf(runtime.record.id), {
+    void appendRuntimeEvent(runtime, {
       kind: 'watch_failed',
       level: 'warn',
       summary: `文件监听失败，已降级为定时/手动同步: ${describeError(error)}`,
@@ -437,18 +481,21 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     const name = typeof filename === 'string' ? filename : filename === null ? '' : filename.toString()
     if (name !== '') runtime.dirtyPaths.add(name)
     clearDebounce(runtime)
+    const scheduledEpoch = runtime.epoch
     runtime.debounceTimer = setTimeout(() => {
       runtime.debounceTimer = undefined
       void enqueue(runtime, async () => {
-        if (!canRunBackgroundSync(runtime)) {
+        if (runtime.epoch !== scheduledEpoch || !canRunBackgroundSync(runtime)) {
           runtime.dirtyPaths.clear()
           return
         }
-        await waitForWriteStable(runtime)
-        runtime.dirtyPaths.clear()
+        // M-4：只快照并清除本次复核的路径，不丢弃等待期间新到达的变更事件。
+        const snapshotNames = [...runtime.dirtyPaths]
+        for (const item of snapshotNames) runtime.dirtyPaths.delete(item)
+        await waitForWriteStable(runtime, snapshotNames, scheduledEpoch)
         // I-3：写稳等待期间若发生暂停、维护、删库或退场，绝不继续发起全量对账。
-        if (!canRunBackgroundSync(runtime)) return
-        await enqueueReconcileNow(runtime, { allowRename: true, trigger: 'debounce' })
+        if (runtime.epoch !== scheduledEpoch || !canRunBackgroundSync(runtime)) return
+        await enqueueReconcileNow(runtime, { allowRename: true, trigger: 'debounce' }, scheduledEpoch)
       }).catch(() => undefined)
     }, debounceMs)
   }
@@ -456,7 +503,8 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   async function statSnapshot(runtime: Runtime, names: readonly string[]): Promise<Map<string, string>> {
     const snapshot = new Map<string, string>()
     for (const name of names) {
-      if (name === '' || isAbsolute(name) || name.includes('..')) {
+      // M-4：仅跳过真正的 `..` 路径段，避免误跳合法文件名如 `report..v2.md`。
+      if (name === '' || isAbsolute(name) || name.split(/[/\\]/u).includes('..')) {
         snapshot.set(name, '')
         continue
       }
@@ -478,15 +526,16 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     return true
   }
 
-  async function waitForWriteStable(runtime: Runtime): Promise<void> {
-    const names = [...runtime.dirtyPaths]
+  async function waitForWriteStable(
+    runtime: Runtime,
+    names: readonly string[],
+    scheduledEpoch: number,
+  ): Promise<void> {
     if (names.length === 0 || writeStableMs === 0) return
     let previous = await statSnapshot(runtime, names)
     for (let attempt = 0; attempt < WRITE_STABLE_MAX_ATTEMPTS; attempt += 1) {
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, writeStableMs)
-      })
-      if (!canRunBackgroundSync(runtime)) return
+      const completed = await waitCancellableStable(runtime, writeStableMs)
+      if (!completed || runtime.epoch !== scheduledEpoch || !canRunBackgroundSync(runtime)) return
       const next = await statSnapshot(runtime, names)
       if (sameSnapshot(previous, next)) return
       previous = next
@@ -534,7 +583,33 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   }
 
   function normalizeRelPath(runtime: Runtime, relPath: string): string {
-    return runtime.caseSensitive ? relPath : relPath.toLowerCase()
+    return runtime.caseSensitive ? relPath : foldAsciiPath(relPath)
+  }
+
+  /**
+   * 单库文件上限预算分配（I-6 修复）：
+   * 盘上存活的已入库文档全部保留且继续正常对账/更新（绝不删除、绝不冻结编辑），
+   * 仅在 `survivingExisting + newAccepted < maxFilesPerKb` 剩余配额内接收新文件，
+   * 防止新增字典序靠前文件导致库内文档数无界膨胀。
+   */
+  function selectFilesWithinCap(
+    walked: readonly WalkedSourceFile[],
+    existingKeys: ReadonlySet<string>,
+    norm: (relPath: string) => string,
+  ): { readonly selected: WalkedSourceFile[]; readonly capSkipped: number } {
+    const survivingExisting: WalkedSourceFile[] = []
+    const candidatesNew: WalkedSourceFile[] = []
+    for (const file of walked) {
+      if (existingKeys.has(norm(file.relPath))) survivingExisting.push(file)
+      else candidatesNew.push(file)
+    }
+    const newBudget = Math.max(0, maxFilesPerKb - survivingExisting.length)
+    const acceptedNew = candidatesNew.slice(0, newBudget)
+    const capSkipped = candidatesNew.length - acceptedNew.length
+    return {
+      selected: [...survivingExisting, ...acceptedNew],
+      capSkipped,
+    }
   }
 
   function skippedInput(runtime: Runtime, file: WalkedSourceFile, reason: string): UpsertDocumentInput {
@@ -596,11 +671,14 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     file: WalkedSourceFile,
     existing: DocumentRecordSummary | undefined,
     report: SyncReport,
+    epoch: number,
   ): Promise<FileOutcome> {
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return { kind: 'aborted' }
     const kbId = runtime.record.id
     const probe: CloudPlaceholderState = probeCloud(file.absPath)
     if (probe === 'dehydrated') {
       // 规格 §6.1：未水合占位文件绝不 open() / 解析，只记 skipped。
+      if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return { kind: 'aborted' }
       await storage.upsertDocument(kbId, skippedInput(runtime, file, CLOUD_DEHYDRATED_REASON))
       return { kind: 'skipped', reason: CLOUD_DEHYDRATED_REASON }
     }
@@ -621,10 +699,11 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       caseSensitive: runtime.caseSensitive,
     }
 
-    if (existing !== undefined) {
+    if (existing !== undefined && existing.sha256 !== '') {
       // 先算 sha256（M-9 hash-only 通道）：内容与提取配置都没变时只更新元数据，
       // 零重切、零清向量、零清 organized_sha256（重绑短路即依赖这条路径）。
       const hashProbe = await pool.extractFile(kbId, { ...request, hashOnly: true })
+      if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return { kind: 'aborted' }
       if (!hashProbe.ok) {
         const action = classifyFailure(hashProbe.reason)
         if (action === 'record-too-large') {
@@ -650,7 +729,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       }
     }
 
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return { kind: 'aborted' }
     const extracted: ExtractionFileResult = await pool.extractFile(kbId, request)
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return { kind: 'aborted' }
     if (!extracted.ok) {
       const action = classifyFailure(extracted.reason)
       if (action === 'record-too-large') {
@@ -695,33 +776,20 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     docs: readonly DocumentRecordSummary[],
     walked: readonly WalkedSourceFile[],
     report: SyncReport,
+    epoch: number,
   ): Promise<ReconcilePlan> {
     const norm = (relPath: string): string => normalizeRelPath(runtime, relPath)
     const existingByKey = new Map<string, DocumentRecordSummary>()
     for (const doc of docs) existingByKey.set(norm(doc.relPath), doc)
 
-    const accepted: WalkedSourceFile[] = []
-    const retained: WalkedSourceFile[] = []
-    let capSkipped = 0
-    for (const file of walked) {
-      if (accepted.length < maxFilesPerKb) {
-        accepted.push(file)
-        continue
-      }
-      // 超限但已入库的文件保留原记录（不删不改），只有新文件被跳过并计入汇总。
-      if (existingByKey.has(norm(file.relPath))) {
-        retained.push(file)
-        continue
-      }
-      capSkipped += 1
-    }
+    const { selected, capSkipped } = selectFilesWithinCap(walked, new Set(existingByKey.keys()), norm)
 
-    // 已入库的超限文件同样进入 diskByKey：它们仍在盘上，绝不是「消失」，
-    // 只是本周期不再重切/重写元数据（retainedKeys 在文档循环里跳过）。
+    const diskByExactPath = new Map<string, WalkedSourceFile>()
     const diskByKey = new Map<string, WalkedSourceFile>()
-    for (const file of accepted) diskByKey.set(norm(file.relPath), file)
-    for (const file of retained) diskByKey.set(norm(file.relPath), file)
-    const retainedKeys = new Set(retained.map((file) => norm(file.relPath)))
+    for (const file of selected) {
+      diskByExactPath.set(file.relPath, file)
+      diskByKey.set(norm(file.relPath), file)
+    }
 
     const deletes: DocumentRecordSummary[] = []
     const upserts: Array<{ readonly file: WalkedSourceFile; readonly existing?: DocumentRecordSummary }> = []
@@ -729,15 +797,12 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     const added: WalkedSourceFile[] = []
 
     for (const doc of docs) {
-      const key = norm(doc.relPath)
-      const file = diskByKey.get(key)
+      // I-9：先按精确 relPath 匹配，再按大小写折叠键匹配（避免误判大小写重命名）。
+      const file = diskByExactPath.get(doc.relPath) ?? diskByKey.get(norm(doc.relPath))
       if (file === undefined) {
         deletes.push(doc)
         continue
       }
-      // 超限但已入库的文件本周期完全不动：不重切、不重写元数据、不参与大小写
-      // 重命名（下一次它排序进入上限内时再恢复正常对账）。
-      if (retainedKeys.has(key)) continue
       if (file.relPath !== doc.relPath) {
         // 大小写不敏感卷上的仅大小写重命名：同 norm 键、不同拼写。
         caseRenames.push({ doc, file })
@@ -745,9 +810,24 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       }
       if (file.size !== doc.size || file.mtimeMs !== doc.mtimeMs) {
         upserts.push({ file, existing: doc })
+      } else if (doc.status === 'skipped' && doc.statusReason === CLOUD_DEHYDRATED_REASON) {
+        // I-9 修复：OneDrive 占位文件水合后 `(size, mtimeMs)` 不变；允许重探属性并在已水合时重索引。
+        const cloudState = probeCloud(file.absPath)
+        if (cloudState === 'probe-unavailable' && !report.probeLogged) {
+          report.probeLogged = true
+          report.systemEvents.push({
+            kind: 'cloud_probe_unavailable',
+            level: 'info',
+            summary: '云盘占位属性探针不可用，按普通本地文件继续索引',
+            detail: 'cloud-placeholder-probe-unavailable',
+          })
+        }
+        if (cloudState !== 'dehydrated') {
+          upserts.push({ file, existing: doc })
+        }
       }
     }
-    for (const file of accepted) {
+    for (const file of selected) {
       if (!existingByKey.has(norm(file.relPath))) added.push(file)
     }
 
@@ -758,7 +838,8 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       && deletes.length === 1
       && added.length === 1
       && onlyVanished !== undefined
-      && onlyAdded !== undefined) {
+      && onlyAdded !== undefined
+      && runtime.epoch === epoch) {
       // I-2（规格 §6.1）：1:1 重命名哈希探针之前必须先查云占位属性，
       // 脱水占位文件绝不 open() 读内容，留给删除 + `cloud-placeholder-dehydrated` 分支。
       const cloudProbe = probeCloud(onlyAdded.absPath)
@@ -780,6 +861,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
           caseSensitive: runtime.caseSensitive,
           hashOnly: true,
         })
+        if (runtime.epoch !== epoch) {
+          return { deletes: [], upserts: [], caseRenames: [], capSkipped: 0 }
+        }
         const sharedHash = docs.some(doc => doc.docId !== onlyVanished.docId && doc.sha256 === onlyVanished.sha256)
         if (probe.ok
           && probe.hashOnly === true
@@ -807,18 +891,20 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtime: Runtime,
     opts: ReconcileOptions,
     report: SyncReport,
+    epoch: number,
   ): Promise<void> {
     const kb = runtime.record
     const kbId = kb.id
     const kbDir = kbDirOf(kbId)
-    const epoch = runtime.epoch
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
     if (isSteadyPhase(runtime.phase)) runtime.phase = 'syncing'
 
     const walked = await walkSourceDirectory(kb.sourceDir, {
       caseSensitive: runtime.caseSensitive,
       shouldIgnore: shouldIgnoreSourceEntry,
+      shouldAbort: () => runtime.epoch !== epoch || !isRuntimeLive(runtime),
     })
-    if (runtime.epoch !== epoch) return
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
     const sourceBroken = walked.skipped.some(entry => entry.relPath === ''
       && (entry.reason === 'read-error' || entry.reason === 'not-regular-file'))
     if (sourceBroken) {
@@ -827,17 +913,19 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         runtime.lastError = 'source directory is not readable'
         closeWatcher(runtime)
         settlePhase(runtime)
-        await appendEvent(kbDir, {
+        await appendRuntimeEvent(runtime, {
           kind: 'source_unavailable',
           level: 'warn',
           summary: `源目录不可读，已保留索引与知识视图: ${kb.sourceDir}`,
         })
+      } else {
+        settlePhase(runtime)
       }
       return
     }
     if (runtime.sourceUnavailable) {
       runtime.sourceUnavailable = false
-      await appendEvent(kbDir, { kind: 'source_restored', level: 'info', summary: `源目录恢复可读: ${kb.sourceDir}` })
+      await appendRuntimeEvent(runtime, { kind: 'source_restored', level: 'info', summary: `源目录恢复可读: ${kb.sourceDir}` })
       ensureWatcher(runtime)
     }
     if (opts.trigger !== 'periodic' && opts.trigger !== 'debounce') {
@@ -860,17 +948,21 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     } catch (error) {
       runtime.phase = 'index-error'
       runtime.lastError = describeError(error)
-      await appendEvent(kbDir, {
+      await appendRuntimeEvent(runtime, {
         kind: 'file_error',
         level: 'error',
         summary: `索引暂不可用: ${describeError(error)}`,
       })
+      // I-9 修复：手动同步遇到索引故障必须向调用方抛出 `index-error`，不可静默 resolve。
+      if (opts.trigger === 'manual') {
+        throw new KnowledgeSyncError('index-error', describeError(error))
+      }
       return
     }
-    if (runtime.epoch !== epoch) return
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
 
-    const plan = await planReconcile(runtime, opts, docs, walked.files, report)
-    if (runtime.epoch !== epoch) return
+    const plan = await planReconcile(runtime, opts, docs, walked.files, report, epoch)
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
 
     if (plan.capSkipped > 0) {
       report.alertEvents.push({
@@ -883,12 +975,22 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
 
     if (plan.rename !== undefined) {
+      if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
       const renamed = await storage.renameDocument(kbId, {
         fromRelPath: plan.rename.doc.relPath,
         toRelPath: plan.rename.file.relPath,
         toNormPath: normalizeRelPath(runtime, plan.rename.file.relPath),
       })
       if (renamed.renamed) {
+        // I-9 修复：1:1 重命名（例如跨卷复制+删除）若 mtimeMs 变化，同步更新元数据避免误报 stale。
+        if (plan.rename.file.size !== plan.rename.doc.size || plan.rename.file.mtimeMs !== plan.rename.doc.mtimeMs) {
+          await storage.updateDocumentMetadata(
+            kbId,
+            plan.rename.file.relPath,
+            plan.rename.file.size,
+            plan.rename.file.mtimeMs,
+          )
+        }
         report.changeCount += 1
         report.infoEvents.push({
           kind: 'file_renamed',
@@ -905,6 +1007,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
 
     for (const entry of plan.caseRenames) {
+      if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
       const renamed = await storage.renameDocument(kbId, {
         fromRelPath: entry.doc.relPath,
         toRelPath: entry.file.relPath,
@@ -919,6 +1022,17 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
           detail: entry.doc.relPath,
           relPath: entry.file.relPath,
         })
+        // I-9 修复：大小写重命名的同时内容或时间发生变化时，不能跳过后续重索引。
+        if (entry.file.size !== entry.doc.size || entry.file.mtimeMs !== entry.doc.mtimeMs) {
+          plan.upserts.push({
+            file: entry.file,
+            existing: {
+              ...entry.doc,
+              relPath: entry.file.relPath,
+              normPath: normalizeRelPath(runtime, entry.file.relPath),
+            },
+          })
+        }
       } else {
         plan.deletes.push(entry.doc)
         plan.upserts.push({ file: entry.file })
@@ -926,7 +1040,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
 
     for (const doc of plan.deletes) {
-      if (runtime.epoch !== epoch) return
+      if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
       const deleted = await storage.deleteDocument(kbId, doc.relPath)
       if (!deleted.deleted) continue
       report.changeCount += 1
@@ -939,8 +1053,8 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
 
     for (const entry of plan.upserts) {
-      if (runtime.epoch !== epoch) return
-      const outcome = await prepareFile(runtime, entry.file, entry.existing, report)
+      if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
+      const outcome = await prepareFile(runtime, entry.file, entry.existing, report, epoch)
       if (outcome.kind === 'aborted') return
       if (outcome.kind === 'short-circuit') continue
       if (outcome.kind === 'indexed') {
@@ -973,7 +1087,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       })
     }
 
-    if (runtime.epoch !== epoch) return
+    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
     await flushReport(kbDir, report)
     runtime.lastSyncedAt = new Date(nowWall()).toISOString()
     settlePhase(runtime)
@@ -1003,7 +1117,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     for (const event of report.alertEvents) await appendEvent(kbDir, event)
   }
 
-  async function reconcile(runtime: Runtime, opts: ReconcileOptions): Promise<void> {
+  async function reconcile(runtime: Runtime, opts: ReconcileOptions, epoch: number): Promise<void> {
     const report: SyncReport = {
       changeCount: 0,
       probeLogged: false,
@@ -1012,7 +1126,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       alertEvents: [],
     }
     try {
-      await reconcileInner(runtime, opts, report)
+      await reconcileInner(runtime, opts, report, epoch)
     } catch (error) {
       runtime.lastError = describeError(error)
       settlePhase(runtime)
@@ -1021,15 +1135,20 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   }
 
   /** 在已排队的任务里先做幂等恢复（wiki-reset-pending / index-error）再对账。 */
-  async function enqueueReconcileNow(runtime: Runtime, opts: ReconcileOptions): Promise<void> {
-    if (!isRuntimeLive(runtime)) return
+  async function enqueueReconcileNow(
+    runtime: Runtime,
+    opts: ReconcileOptions,
+    scheduledEpoch: number,
+  ): Promise<void> {
+    // I-2 修复：入队时刻的 epoch 已失效（例如排队期间发生了 pauseWatch / stopKb / rebuild），
+    // 立即放弃，绝不打开源目录文件或执行延迟到达的旧同步。
+    if (!isRuntimeLive(runtime) || runtime.epoch !== scheduledEpoch) return
     if (opts.trigger !== 'manual' && opts.trigger !== 'rebind') {
       // C-1 / I-3 / I-4：后台触发（startup/debounce/periodic/resume）在维护、暂停或停机时立即早退。
       if (!canRunBackgroundSync(runtime)) return
     } else if (opts.trigger === 'manual' && (runtime.maintaining || locks.has(runtime.record.id))) {
       throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${runtime.record.id} is under maintenance`)
     }
-    const epoch = runtime.epoch
     try {
       await ensureStorageReady(runtime)
     } catch (error) {
@@ -1037,25 +1156,46 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       if (opts.trigger === 'manual') throw error
       return
     }
-    if (runtime.epoch !== epoch || !isRuntimeLive(runtime)) return
-    await reconcile(runtime, opts)
+    if (runtime.epoch !== scheduledEpoch || !isRuntimeLive(runtime)) return
+    await reconcile(runtime, opts, scheduledEpoch)
   }
 
   function enqueueReconcile(runtime: Runtime, opts: ReconcileOptions): Promise<void> {
-    return enqueue(runtime, () => enqueueReconcileNow(runtime, opts))
+    const scheduledEpoch = runtime.epoch
+    return enqueue(runtime, () => enqueueReconcileNow(runtime, opts, scheduledEpoch))
   }
 
   async function startKb(kb: KnowledgeBaseRecord): Promise<void> {
+    const prior = startInFlight.get(kb.id)
+    if (prior !== undefined) await prior.catch(() => undefined)
+    const run = startKbInner(kb)
+    startInFlight.set(kb.id, run)
+    try {
+      await run
+    } finally {
+      if (startInFlight.get(kb.id) === run) startInFlight.delete(kb.id)
+    }
+  }
+
+  async function startKbInner(kb: KnowledgeBaseRecord): Promise<void> {
     if (disposed) throw new KnowledgeSyncError('knowledge-base-busy', 'knowledge sync engine is disposed')
+    if (locks.has(kb.id)) throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kb.id} is busy`)
     if (runtimes.has(kb.id)) await stopKb(kb.id)
+    if (disposed) throw new KnowledgeSyncError('knowledge-base-busy', 'knowledge sync engine is disposed')
+    if (locks.has(kb.id)) throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kb.id} is busy`)
+
     const kbDir = kbDirOf(kb.id)
     await mkdir(kbDir, { recursive: true, mode: 0o700 })
+    if (disposed) throw new KnowledgeSyncError('knowledge-base-busy', 'knowledge sync engine is disposed')
     let caseSensitive = process.platform !== 'win32'
     try {
       caseSensitive = await probeCaseSensitiveDir(kb.sourceDir)
     } catch {
       // 探测失败按平台保守回退。
     }
+    if (disposed) throw new KnowledgeSyncError('knowledge-base-busy', 'knowledge sync engine is disposed')
+    if (locks.has(kb.id)) throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kb.id} is busy`)
+
     const runtime: Runtime = {
       record: kb,
       phase: 'watching',
@@ -1067,6 +1207,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       dirtyPaths: new Set<string>(),
       debounceTimer: undefined,
       staggerCancels: new Set<() => void>(),
+      stableCancels: new Set<() => void>(),
       chain: Promise.resolve(),
       epoch: 0,
       maintaining: false,
@@ -1075,7 +1216,19 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
     runtimes.set(kb.id, runtime)
 
-    const opened = await storage.openKb(kb.id, kbDir)
+    let opened: { readonly ok: true; readonly wikiResetPending: boolean } | { readonly ok: false; readonly code: 'index-error'; readonly error: string }
+    try {
+      opened = await storage.openKb(kb.id, kbDir)
+    } catch (error) {
+      // I-1 修复：`openKb` 抛错时摘除僵尸 runtime，避免残留死对象阻塞后续启动/回滚。
+      if (runtimes.get(kb.id) === runtime) runtimes.delete(kb.id)
+      runtime.stopped = true
+      throw error
+    }
+    if (!isRuntimeLive(runtime)) {
+      if (opened.ok) await closeStorageQuietly(kb.id)
+      return
+    }
     if (!opened.ok) {
       runtime.phase = 'index-error'
       runtime.lastError = opened.error
@@ -1091,11 +1244,12 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     try {
       await access(kb.sourceDir, R_OK)
     } catch (error) {
+      if (!isRuntimeLive(runtime)) return
       if (isSourceMissingError(error)) {
         runtime.sourceUnavailable = true
         if (!needsRecovery(runtime.phase)) runtime.phase = 'source-unavailable'
         runtime.lastError = describeError(error)
-        await appendEvent(kbDir, {
+        await appendRuntimeEvent(runtime, {
           kind: 'source_unavailable',
           level: 'warn',
           summary: `源目录不可读，已保留索引与知识视图: ${kb.sourceDir}`,
@@ -1103,6 +1257,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         return
       }
     }
+    if (!isRuntimeLive(runtime)) return
     ensureWatcher(runtime)
     if (!needsRecovery(runtime.phase)) runtime.phase = idlePhase(runtime)
     // 启动自动全量对账：多库按注册顺序错峰，避免同时扫盘与同时抢 Worker。
@@ -1118,7 +1273,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   }
 
   /**
-   * 停机序列的共享内核：注销运行态、置 `stopped`、取消全部错峰定时器、递增 epoch、
+   * 停机序列的共享内核：注销运行态、置 `stopped`、取消全部错峰与写稳定时器、递增 epoch、
    * 关 Watcher、清防抖与 dirty、中止并排空该库 Extraction Worker（等待句柄随线程退出
    * 关闭），最后等链尾。调用方负责随后的整理取消与 SQLite 关闭，绝不复制这段顺序。
    */
@@ -1129,6 +1284,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtimes.delete(kbId)
     runtime.epoch += 1
     cancelRuntimeStaggerTimers(runtime)
+    cancelRuntimeStableTimers(runtime)
     closeWatcher(runtime)
     clearDebounce(runtime)
     runtime.dirtyPaths.clear()
@@ -1172,6 +1328,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtime.watchPaused = true
     if (!needsRecovery(runtime.phase)) runtime.phase = 'watch-paused'
     runtime.epoch += 1
+    // I-2 / M-4：同步取消所有错峰与写稳等待定时器，确保暂停返回后零后台扫盘与文件句柄。
+    cancelRuntimeStaggerTimers(runtime)
+    cancelRuntimeStableTimers(runtime)
     closeWatcher(runtime)
     clearDebounce(runtime)
     runtime.dirtyPaths.clear()
@@ -1181,18 +1340,23 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     if (!runtime.maintaining && !needsRecovery(runtime.phase)) runtime.phase = 'watch-paused'
   }
 
-  async function resumeWatch(kbId: string): Promise<void> {
+  async function resumeWatch(kbId: string, resumeOpts?: { readonly awaitReconcile?: boolean }): Promise<void> {
     const runtime = requireRuntime(kbId)
     runtime.watchPaused = false
     runtime.watchFailed = false
     closeWatcher(runtime)
     ensureWatcher(runtime)
     if (!needsRecovery(runtime.phase)) runtime.phase = idlePhase(runtime)
-    await enqueueReconcile(runtime, { allowRename: true, trigger: 'resume' })
+    const reconcileTask = enqueueReconcile(runtime, { allowRename: true, trigger: 'resume' })
+    if (resumeOpts?.awaitReconcile === false) {
+      void reconcileTask.catch(() => undefined)
+      return
+    }
+    await reconcileTask
   }
 
   async function syncNow(kbId: string): Promise<void> {
-    const runtime = await ensureRuntime(kbId)
+    const runtime = runtimes.get(kbId) ?? await ensureRuntime(kbId)
     if (locks.has(kbId) || runtime.maintaining) {
       throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kbId} is under maintenance`)
     }
@@ -1226,10 +1390,11 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     }
   }
 
-  /** 维护/重建共用的停机序列：取消错峰 → 停 Watcher → 清防抖与 dirty → 取消整理 → 排空提取。 */
+  /** 维护/重建共用的停机序列：取消错峰与写稳 → 停 Watcher → 清防抖与 dirty → 取消整理 → 排空提取。 */
   async function stopSequence(runtime: Runtime): Promise<void> {
     runtime.epoch += 1
     cancelRuntimeStaggerTimers(runtime)
+    cancelRuntimeStableTimers(runtime)
     closeWatcher(runtime)
     clearDebounce(runtime)
     runtime.dirtyPaths.clear()
@@ -1255,10 +1420,15 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     try {
       runtime.maintaining = true
       await stopSequence(runtime)
+      // I-1 修复：停机期间若已退场或被删库，绝不继续落盘注册表。
+      if (!isRuntimeLive(runtime)) {
+        throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kbId} was stopped during rebind`)
+      }
       // 注册表唯一写者是 Host：先落盘并更新 Host 内存，再收敛运行态与索引。
       // `persist` 失败时完全保留旧 sourceDir、旧索引与旧 wiki（运行态在 finally
       // 用旧记录恢复 Watcher）。
       await persist()
+      if (!isRuntimeLive(runtime)) return
       runtime.record = { ...runtime.record, sourceDir: newSourceDir }
       runtime.sourceUnavailable = false
       runtime.watchFailed = false
@@ -1272,13 +1442,14 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       if (!needsRecovery(runtime.phase)) runtime.phase = idlePhase(runtime)
       // 保留 index.sqlite 与 wiki/，禁用跨目录重命名猜配做全量对账。
       try {
-        await enqueue(runtime, () => reconcile(runtime, { allowRename: false, trigger: 'rebind' }))
+        const rebindEpoch = runtime.epoch
+        await enqueue(runtime, () => reconcile(runtime, { allowRename: false, trigger: 'rebind' }, rebindEpoch))
       } catch (error) {
         // 落盘已成功：收敛失败不回滚、不重写旧目录，磁盘与内存都保持新
         // `sourceDir`，由下次启动对账自愈（规格 §6.4 失败与中断恢复）。
         runtime.lastError = describeError(error)
       }
-      await appendEvent(kbDirOf(kbId), {
+      await appendRuntimeEvent(runtime, {
         kind: 'source_rebound',
         level: 'info',
         summary: `源目录已重绑: ${newSourceDir}`,
@@ -1301,20 +1472,30 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     const release = await acquireLifecycleLock(kbId, 'maintain')
     // C-1：拿到维护锁后立刻置 `maintaining = true`（早于 `access()`），挡住周期/休眠/防抖对账。
     runtime.maintaining = true
+    // C-5 修复：保存重建前的真实阶段（如 `index-error` / `wiki-reset-pending`），
+    // 提交前失败时必须恢复它，绝不因 `runtime.phase = 'rebuilding'` 抹除恢复态。
+    const previousPhase = runtime.phase
     const kbDir = kbDirOf(kbId)
     let committed = false
     try {
       try {
         await access(runtime.record.sourceDir, R_OK)
       } catch (error) {
+        // M-4：源目录不可读时置 `sourceUnavailable = true`，避免 finally 盲目重开 Watcher 多发 watch_failed。
+        runtime.sourceUnavailable = true
         throw new KnowledgeSyncError('source-unavailable', `source directory is not readable: ${describeError(error)}`)
       }
       await stopSequence(runtime)
+      if (!isRuntimeLive(runtime)) {
+        throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kbId} was stopped before rebuild`)
+      }
       // C-1：重建主体串行挂入 `runtime.chain`，彻底杜绝与任何后台对账并发写入活库连接。
       await enqueue(runtime, async () => {
+        if (!isRuntimeLive(runtime)) {
+          throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kbId} was stopped during rebuild`)
+        }
         runtime.phase = 'rebuilding'
-        // I-7：正常重建前先读取既有文档键集，保留排在上限外但已入库且仍在盘上的文件，
-        // 避免重建撤销对账保留语义并给盘上存活文件误写墓碑。
+        // I-7 / I-6：正常重建前先读取既有文档键集，存活已入库文档始终保留，新文件仅占剩余配额。
         let existingKeys = new Set<string>()
         try {
           const existingDocs = await listAllDocs(kbId)
@@ -1326,27 +1507,22 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         const walked = await walkSourceDirectory(runtime.record.sourceDir, {
           caseSensitive: runtime.caseSensitive,
           shouldIgnore: shouldIgnoreSourceEntry,
+          shouldAbort: () => !isRuntimeLive(runtime),
         })
+        if (!isRuntimeLive(runtime)) {
+          throw new KnowledgeSyncError('rebuild-failed', 'knowledge sync engine disposed during rebuild')
+        }
         const sourceBroken = walked.skipped.some(entry => entry.relPath === ''
           && (entry.reason === 'read-error' || entry.reason === 'not-regular-file'))
         if (sourceBroken) {
+          runtime.sourceUnavailable = true
           throw new KnowledgeSyncError('source-unavailable', 'source directory became unreadable during rebuild')
         }
-        const accepted: WalkedSourceFile[] = []
-        const retained: WalkedSourceFile[] = []
-        let capSkipped = 0
-        for (const file of walked.files) {
-          if (accepted.length < maxFilesPerKb) {
-            accepted.push(file)
-            continue
-          }
-          if (existingKeys.has(normalizeRelPath(runtime, file.relPath))) {
-            retained.push(file)
-            continue
-          }
-          capSkipped += 1
-        }
-        const files = [...accepted, ...retained]
+        const { selected: files, capSkipped } = selectFilesWithinCap(
+          walked.files,
+          existingKeys,
+          (relPath: string) => normalizeRelPath(runtime, relPath),
+        )
         const alertEvents: AppendKnowledgeEventInput[] = []
         if (capSkipped > 0) {
           alertEvents.push({
@@ -1371,6 +1547,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         let failedFiles = 0
         let probeLogged = false
         for (const file of files) {
+          if (!isRuntimeLive(runtime)) {
+            throw new KnowledgeSyncError('rebuild-failed', 'knowledge sync engine disposed during rebuild')
+          }
           const probe = probeCloud(file.absPath)
           if (probe === 'dehydrated') {
             await storage.upsertRebuildDocument(kbId, skippedInput(runtime, file, CLOUD_DEHYDRATED_REASON))
@@ -1460,7 +1639,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
           })
           rebuilt += 1
         }
-        for (const event of alertEvents) await appendEvent(kbDir, event)
+        for (const event of alertEvents) await appendRuntimeEvent(runtime, event)
         const commitOptions = {
           ...(opts.afterCommitBeforeReopenForTest === undefined
             ? {}
@@ -1482,7 +1661,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
           // 提交已成功但 Wiki 重置失败：保留 pending 与 `wiki-reset-pending` 阶段，
           // 由后续 sync（ensureStorageReady）幂等续做（规格 §6.4）。
           runtime.phase = 'wiki-reset-pending'
-          await appendEvent(kbDir, {
+          await appendRuntimeEvent(runtime, {
             kind: 'wiki_reset_failed',
             level: 'error',
             summary: '知识视图重置失败，等待重试: wiki reset failed',
@@ -1490,12 +1669,17 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         } else {
           runtime.phase = idlePhase(runtime)
         }
-        await appendEvent(kbDir, {
+        const countsSuffix = skippedFiles === 0 && failedFiles === 0
+          ? `，共 ${String(rebuilt)} 个文件`
+          : `，共 ${String(rebuilt)} 个文件（跳过 ${String(skippedFiles)}，失败 ${String(failedFiles)}）`
+        // I-9（规格 §6.4）：损坏恢复重建必须在 rebuild_completed 中向用户明确告知。
+        await appendRuntimeEvent(runtime, {
           kind: 'rebuild_completed',
           level: 'info',
-          summary: skippedFiles === 0 && failedFiles === 0
-            ? `索引重建完成，共 ${String(rebuilt)} 个文件`
-            : `索引重建完成，共 ${String(rebuilt)} 个文件（跳过 ${String(skippedFiles)}，失败 ${String(failedFiles)}）`,
+          summary: result.corruptRecovery
+            ? `检测到旧索引损坏，已全新重建索引并重置知识视图${countsSuffix}`
+            : `索引重建完成${countsSuffix}`,
+          ...(result.corruptRecovery ? { detail: 'corrupt-recovery' } : {}),
           count: rebuilt,
         })
       })
@@ -1506,9 +1690,18 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
         } catch {
           // 放弃暂存库失败由启动恢复清理。
         }
+        // C-5 修复：提交前失败绝不抹除重建前的 `index-error` / `wiki-reset-pending`；
+        // 若提交前双失败导致主库缺失（仅剩 `.bak`），同样置 `index-error`。
+        if (runtime.phase === 'rebuilding') {
+          if (needsRecovery(previousPhase)) {
+            runtime.phase = previousPhase
+          } else if (!existsSync(join(kbDir, 'index.sqlite')) && existsSync(join(kbDir, 'index.sqlite.bak'))) {
+            runtime.phase = 'index-error'
+          }
+        }
       }
       runtime.lastError = describeError(error)
-      await appendEvent(kbDir, {
+      await appendRuntimeEvent(runtime, {
         kind: 'rebuild_failed',
         level: 'error',
         summary: `索引重建失败: ${describeError(error)}`,
@@ -1526,6 +1719,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   }
 
   async function handleSystemResume(): Promise<void> {
+    // I-9 修复：外部（powerMonitor）触发休眠恢复后同步刷新时钟基线，避免 30s 内 clockTimer 二次重跑。
+    lastWall = nowWall()
+    lastMono = nowMono()
     for (const listener of [...listeners]) {
       try {
         listener()
@@ -1603,10 +1799,12 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       scheduleRuntimeStagger(runtime, delay, run)
     }
   }, reconcileIntervalMs)
+  periodicTimer.unref?.()
   const clockTimer = setInterval(() => {
     if (disposed) return
     void checkClockJump().catch(() => undefined)
   }, CLOCK_CHECK_INTERVAL_MS)
+  clockTimer.unref?.()
 
   return {
     startKb,
@@ -1653,7 +1851,10 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
       disposed = true
       clearInterval(periodicTimer)
       clearInterval(clockTimer)
-      for (const runtime of runtimes.values()) cancelRuntimeStaggerTimers(runtime)
+      for (const runtime of runtimes.values()) {
+        cancelRuntimeStaggerTimers(runtime)
+        cancelRuntimeStableTimers(runtime)
+      }
       for (const timer of staggerTimers) clearTimeout(timer)
       staggerTimers.clear()
       listeners.clear()

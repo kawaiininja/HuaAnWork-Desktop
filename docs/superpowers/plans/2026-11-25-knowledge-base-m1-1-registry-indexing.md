@@ -8,9 +8,9 @@
 
 **Tech Stack:** TypeScript、Node.js `22.19+ / 24+`（`node:sqlite`、`node:worker_threads`、`node:fs/promises`、`node:zlib`）、`@deepseek-ai/dsh-atomic-write`、`adm-zip`（仅解析目录表与原始压缩段，严禁调用 `getData()`）、`koffi`（Windows `kernel32.dll` `GetFileAttributesW` 云占位探针）、`pdfjs-dist`（Apache-2.0，打包 `cmaps/` 与 `standard_fonts/`）、Vitest、tsdown、Electron 44（打包冒烟走 `ELECTRON_RUN_AS_NODE=1`）。
 
-**Spec:** [`docs/superpowers/specs/2026-11-24-knowledge-base-design.md`](../specs/2026-11-24-knowledge-base-design.md)（v2.5）  
-**Review:** [`docs/superpowers/specs/2026-11-24-knowledge-base-design-review.md`](../specs/2026-11-24-knowledge-base-design-review.md)（§10–§17）  
-**Plan Review:** [`docs/superpowers/plans/2026-11-25-knowledge-base-m1-1-plan-review.md`](./2026-11-25-knowledge-base-m1-1-plan-review.md)  
+**Spec:** [`docs/superpowers/specs/2026-11-24-knowledge-base-design.md`](../specs/2026-11-24-knowledge-base-design.md)（v2.5）
+**Review:** [`docs/superpowers/specs/2026-11-24-knowledge-base-design-review.md`](../specs/2026-11-24-knowledge-base-design-review.md)（§10–§17）
+**Plan Review:** [`docs/superpowers/plans/2026-11-25-knowledge-base-m1-1-plan-review.md`](./2026-11-25-knowledge-base-m1-1-plan-review.md)
 **Baseline:** 外层仓库 `209d9f1835`（含 v2.5 规格与六轮评审收口）；上游子模块 `deepseek-harness` pin `1600d8a1e140dcde43a1a0941940a0480712c011`。
 
 **Plan Series:**

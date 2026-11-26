@@ -1,21 +1,37 @@
-import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   neutralKnowledgeBaseDir,
   neutralKnowledgeRootPath,
   neutralKnowledgeWikiRootPath,
 } from '../../src/huaanwork-host/workspace-state.ts'
 import { writeHuaanworkSettings } from '../../src/huaanwork-host/settings.ts'
-import { isUncOrDevicePath, probeCaseSensitiveDir, validateSourceDir } from '../../src/huaanwork-host/knowledge/paths.ts'
+import {
+  foldAsciiPath,
+  inspectUncSymlinkTargetsTopDown,
+  isUncOrDevicePath,
+  normalizeResolvedLocalPath,
+  probeCaseSensitiveDir,
+  validateSourceDir,
+} from '../../src/huaanwork-host/knowledge/paths.ts'
 import { resolveKnowledgeWorkerUrl } from '../../src/huaanwork-host/knowledge/worker-paths.ts'
 import { readKnowledgeBases, writeKnowledgeBases } from '../../src/huaanwork-host/knowledge/registry.ts'
 
 const DIR_SYMLINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'
+const createdTempDirs: string[] = []
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  createdTempDirs.push(dir)
+  return dir
+}
 
 describe('knowledge registry, sourceDir validation, and worker path resolution', () => {
+  afterEach(() => {
+    for (const dir of createdTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
   it('derives isolated knowledge workspace paths and rejects path traversal ids', () => {
     expect(neutralKnowledgeBaseDir('/p')).toBe(join('/p', 'workspace-knowledge'))
     expect(neutralKnowledgeRootPath('/p', 'kb-1')).toBe(join('/p', 'workspace-knowledge', 'kb-1'))
@@ -235,5 +251,79 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
       .toBe(join(pkgRoot, 'lib', 'huaanwork-host', 'knowledge', 'storage-worker.js'))
     expect(fileURLToPath(resolveKnowledgeWorkerUrl('extraction-worker', fromLibDepth1Chunk)))
       .toBe(join(pkgRoot, 'lib', 'huaanwork-host', 'knowledge', 'extraction-worker.js'))
+    // 找不到 package.json 时应显式抛可读错误而非返回错误根路径。
+    const orphanRoot = makeTempDir('kb-no-pkg-')
+    const orphanFile = pathToFileURL(join(orphanRoot, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'x.js')).href
+    expect(() => resolveKnowledgeWorkerUrl('storage-worker', orphanFile)).toThrow(/package\.json/u)
+  })
+
+  it('enforces top-down UNC/device pre-check (C-4), locale-independent ASCII folding (M-4), Windows \\\\?\\ stripping (I-5), and serialized corrupt quarantine (I-10/M-6)', async () => {
+    // C-4: mixed-slash UNC & NT object paths rejected
+    expect(isUncOrDevicePath('\\/server/share/docs')).toBe(true)
+    expect(isUncOrDevicePath('/\\server\\share\\docs')).toBe(true)
+    expect(isUncOrDevicePath('\\??\\UNC\\server\\share')).toBe(true)
+    expect(isUncOrDevicePath('\\??\\C:\\docs')).toBe(true)
+    expect(normalizeResolvedLocalPath('\\\\?\\C:\\Users\\docs')).toBe('C:\\Users\\docs')
+    expect(normalizeResolvedLocalPath('\\\\?\\UNC\\server\\share')).toBeNull()
+    expect(normalizeResolvedLocalPath('\\??\\UNC\\server\\share')).toBeNull()
+    // M-4: ASCII-only folding
+    expect(foldAsciiPath('C:\\Docs\\AbC_İ')).toBe('c:\\docs\\abc_İ')
+
+    const root = makeTempDir('kb-c4-i10-')
+    const profileDir = join(root, 'profile')
+    const validDocs = join(root, 'valid')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(validDocs, { recursive: true })
+
+    if (process.platform !== 'win32') {
+      const uncLink = join(root, 'unc-link')
+      symlinkSync('\\\\server\\share\\docs', uncLink)
+      // C-4：未折叠的 `${uncLink}/../valid` 仍必须在进入 realpath 之前被自顶向下预检拦住。
+      await expect(inspectUncSymlinkTargetsTopDown(`${uncLink}/../valid`)).resolves.toBe('unc-target')
+      await expect(validateSourceDir({ sourceDir: `${uncLink}/../valid`, profileDir, existing: [] }))
+        .resolves.toMatchObject({ ok: false })
+      await expect(inspectUncSymlinkTargetsTopDown(join(uncLink, 'sub', 'deep'))).resolves.toBe('unc-target')
+
+      // C-4：超过 32 跳符号链接循环 fail-closed 返回 too-many-hops。
+      const loopA = join(root, 'loop-a')
+      const loopB = join(root, 'loop-b')
+      symlinkSync(loopB, loopA)
+      symlinkSync(loopA, loopB)
+      await expect(inspectUncSymlinkTargetsTopDown(loopA)).resolves.toBe('too-many-hops')
+      await expect(validateSourceDir({ sourceDir: loopA, profileDir, existing: [] }))
+        .resolves.toMatchObject({ ok: false })
+    }
+
+    // I-10：并发读损坏注册表不抛 ENOENT，且与并发 writeKnowledgeBases 串行化不误隔离新写入的有效文件。
+    const regPath = join(profileDir, 'knowledge-bases.json')
+    writeFileSync(regPath, '{corrupt')
+    const validRec = {
+      id: 'kb-race',
+      name: '并发库',
+      sourceDir: validDocs,
+      autoOrganize: true,
+      watchPaused: false,
+      createdAt: '2026-11-26T00:00:00.000Z',
+    }
+    const [r1, r2] = await Promise.all([
+      readKnowledgeBases(profileDir),
+      readKnowledgeBases(profileDir),
+      writeKnowledgeBases(profileDir, [validRec]),
+    ])
+    expect(Array.isArray(r1)).toBe(true)
+    expect(Array.isArray(r2)).toBe(true)
+    // 并发写完后磁盘上必须仍是有效注册表（绝不被后到的损坏隔离 rename 掉）。
+    await expect(readKnowledgeBases(profileDir)).resolves.toEqual([validRec])
+
+    // M-6：去重重复 id，并丢弃被篡改为 UNC 或空白 sourceDir 的记录。
+    writeFileSync(regPath, JSON.stringify({
+      knowledgeBases: [
+        validRec,
+        { ...validRec, name: '重复ID' },
+        { ...validRec, id: 'kb-unc', sourceDir: '\\\\evil\\share' },
+        { ...validRec, id: 'kb-blank', sourceDir: '   ' },
+      ],
+    }))
+    await expect(readKnowledgeBases(profileDir)).resolves.toEqual([validRec])
   })
 })

@@ -1,11 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { Worker } from 'node:worker_threads'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   detectCloudPlaceholder,
+  formatWin32AttributesPath,
   WIN32_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
 } from '../../src/huaanwork-host/knowledge/cloud-placeholder.ts'
 import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
@@ -27,7 +29,17 @@ function createFakeWatcher(): SyncWatcherHandle & { emitChange: (name: string) =
   return watcher
 }
 
+const syncTempDirs: string[] = []
+function makeSyncTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  syncTempDirs.push(dir)
+  return dir
+}
+
 describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () => {
+  afterEach(() => {
+    for (const dir of syncTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
   it('enforces spec defaults (1 worker, capped at 2, 60s timeout, 256 MB heap) and classifies cloud placeholders', () => {
     const defPool = createExtractionPool()
     expect(defPool.config).toEqual({ maxWorkers: 1, timeoutMs: 60_000, maxOldGenerationSizeMb: 256 })
@@ -479,7 +491,7 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       profileDir,
       storage,
       pool,
-      maxFilesPerKb: 10,
+      maxFilesPerKb: 11,
       debounceMs: 50,
       writeStableMs: 20,
       reconcileIntervalMs: 300_000,
@@ -558,23 +570,29 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       renameSync(join(sourceA, 'A-RENAMED.md'), join(sourceA, 'a-renamed.md'))
       await engine.syncNow('kb-1')
 
-      // > 5 files batch folds into single sync_completed summary & enforces maxFilesPerKb (10).
-      // 字典序前 10 名为 a-renamed + batch-0/1/10/11/2..6；dup3/dup4/multi-a/multi-b 排序
-      // 在上限之外但已入库，必须保留原行与 doc_id（旧实现会把它们当「消失」删掉）。
+      // > 5 files batch folds into single sync_completed summary & enforces maxFilesPerKb (11) strictly (I-6):
+      // 现有 5 份存量文档全部保留且持续可更新，剩余配额 11 - 5 = 6 份接收新文件（触发 >5 折叠），
+      // 其余 6 份超限新文件被跳过，库内文档总数绝不超过上限 11。
       for (let i = 0; i < 12; i += 1) writeFileSync(join(sourceA, `batch-${i}.md`), `批量文档 ${i}`)
       await engine.syncNow('kb-1')
       const eventsAfterBatch = await readKnowledgeEvents(neutralKnowledgeRootPath(profileDir, 'kb-1'))
       expect(eventsAfterBatch.some(e => e.kind === 'sync_completed' && (e.count ?? 0) > 5)).toBe(true)
 
       const capEvent = eventsAfterBatch.find(e => e.kind === 'file_skipped' && (e.detail ?? '').startsWith('max-files-exceeded'))
-      // 汇总只统计真正的新文件（字典序在外的 batch-7/8/9），已入库的超限文档不算新跳过。
-      expect(capEvent?.count).toBe(3)
+      expect(capEvent?.count).toBe(6)
       const docsAfterBatch = (await storage.listDocs('kb-1')).docs
       expect(docsAfterBatch.find(d => d.relPath === 'dup3.md')?.docId).toBe(dup3Id)
       expect(docsAfterBatch.find(d => d.relPath === 'dup4.md')?.docId).toBe(dup4Id)
       expect(docsAfterBatch.find(d => d.relPath === 'multi-a.md')?.docId).toBe(multiAId)
       expect(docsAfterBatch.find(d => d.relPath === 'multi-b.md')?.docId).toBe(multiBId)
-      expect(docsAfterBatch).toHaveLength(14)
+      expect(docsAfterBatch).toHaveLength(11)
+      // I-6 回归：即使在上限满额状态，存量文档（字典序靠后的 dup3.md）修改后仍能正常同步更新，绝不被冻结。
+      const dup3ShaBefore = docsAfterBatch.find(d => d.relPath === 'dup3.md')?.sha256
+      writeFileSync(join(sourceA, 'dup3.md'), '满额后存量文档编辑更新')
+      const dup3Future = new Date(Date.now() + 90_000)
+      utimesSync(join(sourceA, 'dup3.md'), dup3Future, dup3Future)
+      await engine.syncNow('kb-1')
+      expect((await storage.listDocs('kb-1')).docs.find(d => d.relPath === 'dup3.md')?.sha256).not.toBe(dup3ShaBefore)
 
       // Seed organized_sha256, wiki card, and chunk_embeddings BEFORE rebind (R3-I7)
       const alphaBeforeRebind = (await storage.listDocs('kb-1')).docs.find(d => d.relPath === 'a-renamed.md')!
@@ -853,15 +871,17 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       mkdirSync(join(neutralKnowledgeWikiRootPath(profileDir, kbId), 'docs'), { recursive: true })
       writeFileSync(join(neutralKnowledgeWikiRootPath(profileDir, kbId), 'docs', `${cDoc.docId}.md`), '# C 卡片')
 
-      // I-7：新增排在前面的 a.md 后，已入库的 c.md 掉出 maxFilesPerKb(2)，重建时必须保留 c.md 且不写墓碑。
+      // I-6 / I-7：已满 maxFilesPerKb(2) 时新增排在前面的 a.md 不得突破上限 2，
+      // 且已入库的 b.md / c.md 保留在盘上并在重建时保留 docId、不写墓碑。
       writeFileSync(join(sourceDir, 'a.md'), '字典序最前文档 A')
       await engine.syncNow(kbId)
-      expect((await storage.listDocs(kbId)).docs.map(d => d.relPath).sort()).toEqual(['a.md', 'b.md', 'c.md'])
+      expect((await storage.listDocs(kbId)).docs.map(d => d.relPath).sort()).toEqual(['b.md', 'c.md'])
       await engine.rebuildIndex(kbId)
       const afterRebuild = (await storage.listDocs(kbId)).docs
-      expect(afterRebuild.map(d => d.relPath).sort()).toEqual(['a.md', 'b.md', 'c.md'])
+      expect(afterRebuild.map(d => d.relPath).sort()).toEqual(['b.md', 'c.md'])
       expect(afterRebuild.find(d => d.relPath === 'c.md')?.docId).toBe(cDoc.docId)
       expect((await storage.getPendingOrganizeBatch(kbId, Date.now())).tombstones).toEqual([])
+      rmSync(join(sourceDir, 'a.md'), { force: true })
 
       // I-2：1:1 重命名目标为未水合云占位文件时，不得先调 extractFile 打开内容。
       cloudMode = 'dehydrated-renamed'
@@ -878,13 +898,13 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       await engine.syncNow(kbId)
 
       // I-11：worker-crashed 必须落 error 行并在未修改时不反复打崩 Worker。
-      crashFile = 'a.md'
-      writeFileSync(join(sourceDir, 'a.md'), '触发 OOM 崩溃内容')
+      crashFile = 'b.md'
+      writeFileSync(join(sourceDir, 'b.md'), '触发 OOM 崩溃内容')
       const future = new Date(Date.now() + 60_000)
-      utimesSync(join(sourceDir, 'a.md'), future, future)
+      utimesSync(join(sourceDir, 'b.md'), future, future)
       await engine.syncNow(kbId)
       expect(crashCalls).toBe(1)
-      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === 'a.md')).toMatchObject({
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === 'b.md')).toMatchObject({
         status: 'error',
         statusReason: 'worker-crashed',
       })
@@ -936,6 +956,196 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       await engine2.dispose()
       await pool2.dispose()
       await storage2.dispose(900)
+    }
+  })
+
+  it('preserves index-error / wiki-reset-pending on pre-commit rebuildIndex failure (C-5), cancels queued syncNow on pauseWatch (I-2), and covers I-9/I-11/M-4 regressions', async () => {
+    // I-9：Windows 长路径云占位属性探针补 \\?\ 前缀。
+    const longWinPath = `C:\\Users\\demo\\${'nested\\'.repeat(40)}doc.pdf`
+    expect(formatWin32AttributesPath(longWinPath).startsWith('\\\\?\\C:\\Users\\')).toBe(true)
+    expect(formatWin32AttributesPath('C:\\short.txt')).toBe('C:\\short.txt')
+
+    // I-11：ExtractionPool 支持排队期 AbortSignal、同步 spawn 错误隔离为 worker-crashed、并发 dispose 共享退场。
+    const badPool = createExtractionPool({ workerUrl: new URL('http://invalid-worker-protocol.example/worker.js') })
+    const badRes = await badPool.extractFile('kb-bad', { sourceRoot: '/tmp', filePath: '/tmp/x', relPath: 'x' })
+    expect(badRes).toMatchObject({ ok: false, reason: 'worker-crashed' })
+    await Promise.all([badPool.dispose(), badPool.dispose()])
+
+    const root = makeSyncTempDir('kb-c5-i2-i9-')
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'src')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'base.md'), '基础文档')
+    writeFileSync(join(sourceDir, 'Desktop.ini'), 'ignored-win')
+    writeFileSync(join(sourceDir, 'THUMBS.DB'), 'ignored-thumbs')
+    writeFileSync(join(sourceDir, 'report..v2.md'), '双点合法文件名')
+
+    const poolDir = join(root, 'pool-sig')
+    mkdirSync(poolDir, { recursive: true })
+    writeFileSync(join(poolDir, 'slow.md'), 'slow')
+    writeFileSync(join(poolDir, 'wait.md'), 'wait')
+    const sigPool = createExtractionPool({ maxWorkers: 1, timeoutMs: 30_000 })
+    try {
+      const first = sigPool.extractFile('kb-s1', { sourceRoot: poolDir, filePath: join(poolDir, 'slow.md'), relPath: 'slow.md', debugDelayMs: 5_000 })
+      await vi.waitFor(() => { expect(sigPool.activeWorkerCount()).toBe(1) }, { timeout: 2_000 })
+      const ac = new AbortController()
+      const queued = sigPool.extractFile('kb-s2', { sourceRoot: poolDir, filePath: join(poolDir, 'wait.md'), relPath: 'wait.md' }, ac.signal)
+      ac.abort()
+      await expect(queued).resolves.toMatchObject({ ok: false, reason: 'aborted' })
+      // 取消排队任务绝不误杀仍在跑 kb-s1 的忙碌 Worker。
+      expect(sigPool.activeWorkerCount()).toBe(1)
+      await Promise.all([sigPool.dispose(), sigPool.dispose()])
+      await expect(first).resolves.toMatchObject({ ok: false, reason: 'aborted' })
+      expect(sigPool.activeWorkerCount()).toBe(0)
+    } finally {
+      await sigPool.dispose()
+    }
+
+    // C-5 + I-2 + I-9 + M-4 同步引擎综合验证。
+    let fakeWall = 2_000_000
+    let fakeMono = 1_000
+    let cloudHydrated = false
+    const storage = createKnowledgeStorageClient()
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    const watchers: Array<ReturnType<typeof createFakeWatcher>> = []
+    const resumeSpy = vi.fn()
+    const engine = createKnowledgeSyncEngine({
+      profileDir,
+      storage,
+      pool,
+      debounceMs: 20,
+      writeStableMs: 10,
+      reconcileIntervalMs: 300_000,
+      nowWall: () => fakeWall,
+      nowMono: () => fakeMono,
+      watchFactory: () => {
+        const w = createFakeWatcher()
+        watchers.push(w)
+        return w
+      },
+      detectCloudPlaceholder: (p) => (p.endsWith('cloud-hydrate.md') && !cloudHydrated ? 'dehydrated' : 'local'),
+    })
+    engine.onSystemResume(resumeSpy)
+    try {
+      const kbId = 'kb-reg'
+      const kbDir = neutralKnowledgeRootPath(profileDir, kbId)
+      writeFileSync(join(sourceDir, 'cloud-hydrate.md'), '水合后可读内容')
+      await engine.startKb({ id: kbId, name: '回归库', sourceDir, autoOrganize: false, watchPaused: true, createdAt: '2026-11-26T00:00:00.000Z' })
+      await engine.syncNow(kbId)
+
+      // M-4：大小写无关忽略 Desktop.ini / THUMBS.DB，合法 report..v2.md 正常入库。
+      const initialDocs = (await storage.listDocs(kbId)).docs
+      expect(initialDocs.some(d => d.relPath === 'Desktop.ini' || d.relPath === 'THUMBS.DB')).toBe(false)
+      expect(initialDocs.some(d => d.relPath === 'report..v2.md')).toBe(true)
+      expect(initialDocs.find(d => d.relPath === 'cloud-hydrate.md')).toMatchObject({
+        status: 'skipped',
+        statusReason: 'cloud-placeholder-dehydrated',
+      })
+
+      // I-9：OneDrive 占位文件水合后 (size, mtimeMs) 不变仍会被重新索引！
+      cloudHydrated = true
+      await engine.syncNow(kbId)
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === 'cloud-hydrate.md')).toMatchObject({
+        status: 'indexed',
+      })
+
+      // I-9：1:1 重命名同时变化 mtimeMs 时同步更新数据库 mtimeMs；大小写重命名同时改内容不丢编辑。
+      renameSync(join(sourceDir, 'base.md'), join(sourceDir, 'base-moved.md'))
+      const movedMtime = new Date(Date.now() + 180_000)
+      utimesSync(join(sourceDir, 'base-moved.md'), movedMtime, movedMtime)
+      await engine.syncNow(kbId)
+      const movedDoc = (await storage.listDocs(kbId)).docs.find(d => d.relPath === 'base-moved.md')
+      expect(Math.abs((movedDoc?.mtimeMs ?? 0) - movedMtime.getTime())).toBeLessThan(2_000)
+
+      engine.setCaseSensitiveForTest(kbId, false)
+      const shaBeforeCaseEdit = movedDoc?.sha256
+      renameSync(join(sourceDir, 'base-moved.md'), join(sourceDir, 'BASE-MOVED.md'))
+      writeFileSync(join(sourceDir, 'BASE-MOVED.md'), '大小写重命名同时修改了正文')
+      const caseFuture = new Date(Date.now() + 240_000)
+      utimesSync(join(sourceDir, 'BASE-MOVED.md'), caseFuture, caseFuture)
+      await engine.syncNow(kbId)
+      const afterCaseEdit = (await storage.listDocs(kbId)).docs.find(d => d.relPath === 'BASE-MOVED.md')
+      expect(afterCaseEdit?.docId).toBe(movedDoc?.docId)
+      expect(afterCaseEdit?.sha256).not.toBe(shaBeforeCaseEdit)
+
+      // I-9：handleSystemResume 刷新时钟基线，紧接着 checkClockJump 不再二次唤醒。
+      fakeWall += 120_000
+      fakeMono += 50
+      await engine.handleSystemResume()
+      expect(resumeSpy).toHaveBeenCalledTimes(1)
+      expect(await engine.checkClockJump()).toBe(false)
+      expect(resumeSpy).toHaveBeenCalledTimes(1)
+
+      // I-2：对账在途时排队第二个手动 syncNow，随后立刻 pauseWatch，排队的 syncNow 绝不继续打开源目录文件。
+      await engine.resumeWatch(kbId)
+      const realExtract = pool.extractFile.bind(pool)
+      let releaseFirst!: () => void
+      let firstEntered!: () => void
+      const enteredGate = new Promise<void>(resolve => { firstEntered = resolve })
+      let holdFirst = true
+      let callsAfterPause = 0
+      let pausedFlag = false
+      const spy = vi.spyOn(pool, 'extractFile').mockImplementation(async (id, req, signal) => {
+        if (pausedFlag) callsAfterPause += 1
+        if (holdFirst && req.relPath === 'trigger-i2.md') {
+          holdFirst = false
+          firstEntered()
+          await new Promise<void>(resolve => { releaseFirst = resolve })
+        }
+        return realExtract(id, req, signal)
+      })
+      try {
+        writeFileSync(join(sourceDir, 'trigger-i2.md'), '第一批触发')
+        const sync1 = engine.syncNow(kbId)
+        await enteredGate
+        writeFileSync(join(sourceDir, 'queued-i2.md'), '排队手动同步不应在暂停后运行')
+        const sync2 = engine.syncNow(kbId)
+        const pausing = engine.pauseWatch(kbId)
+        releaseFirst()
+        await Promise.all([sync1, sync2, pausing])
+        pausedFlag = true
+        await new Promise<void>(resolve => { setTimeout(resolve, 40) })
+        expect(callsAfterPause).toBe(0)
+        expect((await storage.listDocs(kbId)).docs.some(d => d.relPath === 'queued-i2.md')).toBe(false)
+      } finally {
+        spy.mockRestore()
+      }
+
+      // I-9：手动 syncNow 在 listAllDocs 抛错时必须透传 index-error（不再静默 resolve）。
+      const listSpy = vi.spyOn(storage, 'listDocs').mockRejectedValueOnce(new Error('SQLITE_CORRUPT'))
+      try {
+        await expect(engine.syncNow(kbId)).rejects.toThrow(/index-error/u)
+        expect(engine.getState(kbId)?.phase).toBe('index-error')
+      } finally {
+        listSpy.mockRestore()
+      }
+
+      // C-5：在 index-error 恢复态调用 rebuildIndex 且提交前失败（模拟 abortRebuild/commit 失败），
+      // 阶段必须保持 index-error（绝不被抹成 watching），且不挂起 Watcher。
+      const beginSpy = vi.spyOn(storage, 'beginRebuild').mockRejectedValueOnce(new Error('disk-full-pre-commit'))
+      try {
+        await expect(engine.rebuildIndex(kbId)).rejects.toThrow(/rebuild-failed/u)
+        expect(engine.getState(kbId)?.phase).toBe('index-error')
+        expect(engine.getState(kbId)?.watching).toBe(false)
+      } finally {
+        beginSpy.mockRestore()
+      }
+
+      // I-9（规格 §6.4）：损坏恢复重建完成后 rebuild_completed 必须包含中文提示语。
+      await storage.closeKb(kbId)
+      writeFileSync(join(kbDir, 'index.sqlite'), 'CORRUPT_HEADER')
+      await engine.rebuildIndex(kbId)
+      const events = await readKnowledgeEvents(kbDir)
+      expect(events.some(
+        e => e.kind === 'rebuild_completed' && e.summary.includes('检测到旧索引损坏，已全新重建索引并重置知识视图'),
+      )).toBe(true)
+      // 保持未使用路径引用消除告警（pathToFileURL 在同文件可能被后续测试引用）。
+      expect(pathToFileURL(kbDir).protocol).toBe('file:')
+    } finally {
+      await engine.dispose()
+      await pool.dispose()
+      await storage.dispose(900)
     }
   })
 })

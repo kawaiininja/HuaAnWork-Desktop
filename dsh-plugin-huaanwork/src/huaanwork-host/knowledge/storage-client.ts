@@ -79,20 +79,37 @@ export interface KnowledgeStorageClient {
 }
 
 interface PendingCall {
+  readonly worker: Worker
   readonly resolve: (value: unknown) => void
   readonly reject: (error: Error) => void
 }
 
 /**
  * 创建 Storage Worker 客户端。Worker 直到第一次真实调用才创建；同一客户端
- * 的调用按 `id` 一一对应，互不阻塞。
+ * 的调用按 `id` 与归属 Worker 一一对应，互不串扰（I-4 修复）。Worker 意外
+ * 崩溃重启后自动重开先前已打开的知识库连接，并记忆化 `disposePromise`。
  */
 export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): KnowledgeStorageClient {
   const workerUrl = opts?.workerUrl
   let worker: Worker | undefined
   let disposed = false
+  let disposePromise: Promise<void> | undefined
   let nextId = 1
   const pending = new Map<number, PendingCall>()
+  /** 已成功打开的库目录映射：Worker 意外崩溃拉起新实例时自动重开（I-4）。 */
+  const openedKbs = new Map<string, string>()
+  let needsReopen = false
+  let reopenPromise: Promise<void> | undefined
+
+  function failCallsForWorker(target: Worker, error: Error): void {
+    const victims: PendingCall[] = []
+    for (const [id, call] of pending) {
+      if (call.worker !== target) continue
+      pending.delete(id)
+      victims.push(call)
+    }
+    for (const call of victims) call.reject(error)
+  }
 
   function failAll(error: Error): void {
     const calls = [...pending.values()]
@@ -100,14 +117,14 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
     for (const call of calls) call.reject(error)
   }
 
-  function ensureWorker(): Worker {
-    if (worker !== undefined) return worker
+  function ensureWorker(): { readonly target: Worker; readonly ready: Promise<void> | undefined } {
+    if (worker !== undefined) return { target: worker, ready: reopenPromise }
     const created = new Worker(workerUrl ?? resolveKnowledgeWorkerUrl('storage-worker'), {
       name: 'dsh-knowledge-storage',
     })
     created.on('message', (message: StorageWorkerResponse) => {
       const call = pending.get(message.id)
-      if (call === undefined) return
+      if (call === undefined || call.worker !== created) return
       pending.delete(message.id)
       if (message.ok) {
         call.resolve(message.result)
@@ -116,15 +133,43 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
       call.reject(new KnowledgeStorageError(message.error, message.code))
     })
     created.on('error', (error: Error) => {
-      if (worker === created) worker = undefined
-      failAll(error)
+      if (worker === created) {
+        worker = undefined
+        reopenPromise = undefined
+        if (!disposed && openedKbs.size > 0) needsReopen = true
+      }
+      failCallsForWorker(created, error)
     })
     created.on('exit', (code: number) => {
-      if (worker === created) worker = undefined
-      failAll(new KnowledgeStorageError(`knowledge storage worker exited with code ${String(code)}`))
+      if (worker === created) {
+        worker = undefined
+        reopenPromise = undefined
+        if (!disposed && openedKbs.size > 0) needsReopen = true
+      }
+      failCallsForWorker(created, new KnowledgeStorageError(`knowledge storage worker exited with code ${String(code)}`))
     })
     worker = created
-    return created
+    if (needsReopen && openedKbs.size > 0) {
+      needsReopen = false
+      const snapshot = [...openedKbs.entries()]
+      const restoring = (async () => {
+        for (const [kbId, kbDir] of snapshot) {
+          if (disposed || worker !== created) return
+          if (openedKbs.get(kbId) !== kbDir) continue
+          try {
+            const reopened = await send(created, id => ({ id, op: 'openKb', kbId, kbDir }))
+            if (!reopened.ok && openedKbs.get(kbId) === kbDir) openedKbs.delete(kbId)
+          } catch {
+            // 新 Worker 在恢复途中再次崩溃时交给外层请求失败。
+            return
+          }
+        }
+      })().finally(() => {
+        if (reopenPromise === restoring) reopenPromise = undefined
+      })
+      reopenPromise = restoring
+    }
+    return { target: created, ready: reopenPromise }
   }
 
   function send<K extends keyof StorageResultMap>(
@@ -134,7 +179,7 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
     const id = nextId
     nextId += 1
     return new Promise<StorageResultMap[K]>((resolve, reject) => {
-      pending.set(id, { resolve: resolve as (value: unknown) => void, reject })
+      pending.set(id, { worker: target, resolve: resolve as (value: unknown) => void, reject })
       try {
         target.postMessage(build(id))
       } catch (error) {
@@ -144,20 +189,40 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
     })
   }
 
-  function request<K extends keyof StorageResultMap>(
+  async function request<K extends keyof StorageResultMap>(
     build: (id: number) => Extract<StorageWorkerRequest, { op: K }>,
+    options?: { readonly skipReopen?: boolean },
   ): Promise<StorageResultMap[K]> {
     // 退场后绝不再拉起新线程：Host 的并行退场会与引擎停机序列交叉调用，
     // 重新 spawn 会留下永不回收的 Storage Worker。
     if (disposed) {
-      return Promise.reject(new KnowledgeStorageError('knowledge storage client disposed'))
+      throw new KnowledgeStorageError('knowledge storage client disposed')
     }
-    return send(ensureWorker(), build)
+    const { target, ready } = ensureWorker()
+    if (options?.skipReopen !== true && ready !== undefined) {
+      await ready
+      if (disposed) throw new KnowledgeStorageError('knowledge storage client disposed')
+      if (worker !== target) {
+        // 恢复期间新 Worker 再次退出：回退给本次调用方，不静默死循环。
+        throw new KnowledgeStorageError('knowledge storage worker exited during recovery')
+      }
+    }
+    return send(target, build)
   }
 
   return {
-    openKb: (kbId, kbDir) => request(id => ({ id, op: 'openKb', kbId, kbDir })),
-    closeKb: (kbId) => request(id => ({ id, op: 'closeKb', kbId })),
+    async openKb(kbId, kbDir) {
+      const result = await request(id => ({ id, op: 'openKb', kbId, kbDir }))
+      if (!disposed) {
+        if (result.ok) openedKbs.set(kbId, kbDir)
+        else openedKbs.delete(kbId)
+      }
+      return result
+    },
+    async closeKb(kbId) {
+      openedKbs.delete(kbId)
+      await request(id => ({ id, op: 'closeKb', kbId }))
+    },
     upsertDocument: (kbId, input) => request(id => ({ id, op: 'upsertDocument', kbId, input })),
     updateDocumentMetadata: (kbId, relPath, size, mtimeMs) => request(
       id => ({ id, op: 'updateDocumentMetadata', kbId, relPath, size, mtimeMs }),
@@ -199,7 +264,7 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
     })),
     beginRebuild: (kbId, kbDir) => request(id => ({ id, op: 'beginRebuild', kbId, kbDir })),
     upsertRebuildDocument: (kbId, input) => request(id => ({ id, op: 'upsertRebuildDocument', kbId, input })),
-    commitRebuild: (kbId, kbDir, commitOpts) => {
+    async commitRebuild(kbId, kbDir, commitOpts) {
       // 控制器裁决 M-1：函数留在 Host 进程内，跨线程只传「是否注入」的布尔。
       const testHooks = commitOpts === undefined
         ? undefined
@@ -208,16 +273,21 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
             ...(commitOpts.failWikiResetOnceForTest === undefined ? {} : { failWikiResetOnce: true }),
             ...(commitOpts.failBeforeCommitPointForTest === undefined ? {} : { failBeforeCommitPoint: true }),
           }
-      return request(id => ({
+      const result = await request(id => ({
         id,
         op: 'commitRebuild',
         kbId,
         kbDir,
         ...(testHooks === undefined ? {} : { testHooks }),
       }))
+      if (!disposed) {
+        if (result.ok) openedKbs.set(kbId, kbDir)
+        else if (result.code === 'index-error') openedKbs.delete(kbId)
+      }
+      return result
     },
     abortRebuild: (kbId, kbDir) => request(id => ({ id, op: 'abortRebuild', kbId, kbDir })),
-    retryPendingWikiReset: (kbId, kbDir) => request(id => ({ id, op: 'retryPendingWikiReset', kbId, kbDir })),
+    retryPendingWikiReset: (kbId, kbDir) => request(id => ({ id, op: 'retryPendingWikiReset', kbId, kbDir }), { skipReopen: true }),
     recordOrganizeFailure: (kbId, docId, sha256, error, nowMs) => request(id => ({
       id,
       op: 'recordOrganizeFailure',
@@ -271,43 +341,55 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
     })),
     countEmbeddings: (kbId, docId) => request(id => ({ id, op: 'countEmbeddings', kbId, docId })),
     isRunning: () => worker !== undefined,
-    async dispose(budgetMs: number = STORAGE_CLIENT_DISPOSE_BUDGET_MS): Promise<void> {
-      if (disposed) return
+    dispose(budgetMs: number = STORAGE_CLIENT_DISPOSE_BUDGET_MS): Promise<void> {
+      if (disposePromise !== undefined) return disposePromise
       disposed = true
       const current = worker
-      if (current === undefined) return
       worker = undefined
-      const budget = Math.max(0, Math.trunc(budgetMs))
-      const deadline = performance.now() + budget
-      let timer: NodeJS.Timeout | undefined
-      const timeout = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, budget)
-      })
-      try {
-        await Promise.race([
-          send(current, id => ({ id, op: 'shutdown' })).catch(() => undefined),
-          timeout,
-        ])
-      } finally {
-        if (timer !== undefined) clearTimeout(timer)
+      reopenPromise = undefined
+      needsReopen = false
+      openedKbs.clear()
+      if (current === undefined) {
+        failAll(new KnowledgeStorageError('knowledge storage client disposed'))
+        disposePromise = Promise.resolve()
+        return disposePromise
       }
-      failAll(new KnowledgeStorageError('knowledge storage client disposed'))
-      // M-8：在总预算 `budgetMs` 内等待 `terminate()`；预算耗尽时仍立即发 `terminate()`，不超预算阻塞退场。
-      const terminating = current.terminate().catch(() => undefined)
-      const remaining = Math.max(0, Math.ceil(deadline - performance.now()))
-      if (remaining > 0) {
-        let termTimer: NodeJS.Timeout | undefined
+      const budget = Number.isFinite(budgetMs)
+        ? Math.max(0, Math.trunc(budgetMs))
+        : STORAGE_CLIENT_DISPOSE_BUDGET_MS
+      disposePromise = (async () => {
+        const deadline = performance.now() + budget
+        let timer: NodeJS.Timeout | undefined
+        const timeout = new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, budget)
+        })
         try {
           await Promise.race([
-            terminating,
-            new Promise<void>((resolve) => {
-              termTimer = setTimeout(resolve, remaining)
-            }),
+            send(current, id => ({ id, op: 'shutdown' })).catch(() => undefined),
+            timeout,
           ])
         } finally {
-          if (termTimer !== undefined) clearTimeout(termTimer)
+          if (timer !== undefined) clearTimeout(timer)
         }
-      }
+        failAll(new KnowledgeStorageError('knowledge storage client disposed'))
+        // M-8：在总预算 `budgetMs` 内等待 `terminate()`；预算耗尽时仍立即发 `terminate()`，不超预算阻塞退场。
+        const terminating = current.terminate().catch(() => undefined)
+        const remaining = Math.max(0, Math.ceil(deadline - performance.now()))
+        if (remaining > 0) {
+          let termTimer: NodeJS.Timeout | undefined
+          try {
+            await Promise.race([
+              terminating,
+              new Promise<void>((resolve) => {
+                termTimer = setTimeout(resolve, remaining)
+              }),
+            ])
+          } finally {
+            if (termTimer !== undefined) clearTimeout(termTimer)
+          }
+        }
+      })()
+      return disposePromise
     },
   }
 }

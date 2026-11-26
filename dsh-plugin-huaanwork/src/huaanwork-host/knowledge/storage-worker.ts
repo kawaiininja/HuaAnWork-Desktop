@@ -60,8 +60,24 @@ interface OpenKbEntry {
   readonly kbDir: string
 }
 
+interface ActiveRebuild {
+  readonly staging: RebuildStaging
+  readonly kbDir: string
+}
+
 const openKbs = new Map<string, OpenKbEntry>()
-const rebuilds = new Map<string, RebuildStaging>()
+const rebuilds = new Map<string, ActiveRebuild>()
+
+function abortActiveRebuild(kbId: string): void {
+  const active = rebuilds.get(kbId)
+  if (active === undefined) return
+  rebuilds.delete(kbId)
+  try {
+    abortRebuildStaging(active.kbDir, active.staging)
+  } catch {
+    // 关闭暂存库句柄尽力而为，避免阻断 closeKb / shutdown（I-4）。
+  }
+}
 
 /** 带上可跨线程回传错误码的操作错误（不依赖 `Error.cause` 的形状）。 */
 class StorageOperationError extends Error {
@@ -153,6 +169,8 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
     case 'openKb':
       return openKb(message.kbId, message.kbDir)
     case 'closeKb': {
+      // I-4 修复：关库时同步释放该库仍在进行的重建暂存句柄，防止 Windows EBUSY 句柄泄漏。
+      abortActiveRebuild(message.kbId)
       const entry = openKbs.get(message.kbId)
       if (entry !== undefined) closeEntry(message.kbId, entry)
       return undefined
@@ -191,27 +209,26 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
           : { expectedExtractConfigHash: message.expectedExtractConfigHash }),
       })
     case 'beginRebuild': {
-      const previous = rebuilds.get(message.kbId)
-      if (previous !== undefined) {
-        abortRebuildStaging(message.kbDir, previous)
-        rebuilds.delete(message.kbId)
-      }
-      const staging = beginRebuildStaging(message.kbDir)
-      rebuilds.set(message.kbId, staging)
+      abortActiveRebuild(message.kbId)
+      // I-3 修复：复用已打开的 live 连接读旧库快照，避免另开只读连接受 WAL 锁冲突误判损坏。
+      const liveDb = openKbs.get(message.kbId)?.db
+      const staging = beginRebuildStaging(message.kbDir, liveDb)
+      rebuilds.set(message.kbId, { staging, kbDir: message.kbDir })
       return { corruptRecovery: staging.corruptRecovery }
     }
     case 'upsertRebuildDocument': {
-      const staging = rebuilds.get(message.kbId)
-      if (staging === undefined) {
+      const active = rebuilds.get(message.kbId)
+      if (active === undefined) {
         throw new StorageOperationError(`knowledge rebuild for ${message.kbId} is not in progress`, 'rebuild-failed')
       }
-      return staging.upsert(message.input)
+      return active.staging.upsert(message.input)
     }
     case 'commitRebuild': {
-      const staging = rebuilds.get(message.kbId)
-      if (staging === undefined) {
+      const active = rebuilds.get(message.kbId)
+      if (active === undefined) {
         throw new StorageOperationError(`knowledge rebuild for ${message.kbId} is not in progress`, 'rebuild-failed')
       }
+      const staging = active.staging
       rebuilds.delete(message.kbId)
       const entry = openKbs.get(message.kbId)
       const wasOpen = entry !== undefined
@@ -244,9 +261,9 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
       return result
     }
     case 'abortRebuild': {
-      const staging = rebuilds.get(message.kbId)
+      const active = rebuilds.get(message.kbId)
       rebuilds.delete(message.kbId)
-      if (staging !== undefined) abortRebuildStaging(message.kbDir, staging)
+      if (active !== undefined) abortRebuildStaging(message.kbDir, active.staging)
       return undefined
     }
     case 'retryPendingWikiReset':
@@ -293,11 +310,12 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
     case 'countEmbeddings':
       return countEmbeddings(requireEntry(message.kbId).db, message.docId)
     case 'shutdown': {
+      // I-4 修复：停机前必须先放弃并关闭所有在途重建暂存库，避免泄漏 SQLite 文件句柄。
+      for (const kbId of [...rebuilds.keys()]) abortActiveRebuild(kbId)
       for (const kbId of [...openKbs.keys()]) {
         const entry = openKbs.get(kbId)
         if (entry !== undefined) closeEntry(kbId, entry)
       }
-      rebuilds.clear()
       // 先让响应离开，再结束本线程（这只终止 Worker，不影响宿主进程）。
       setImmediate(() => {
         process.exit(0)

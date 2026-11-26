@@ -26,6 +26,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -36,7 +37,7 @@ import type { SQLInputValue, SQLOutputValue } from 'node:sqlite'
 
 import type { SingleKbCandidate } from './ranker.ts'
 import type { StorageGetChunkResult } from './storage-protocol.ts'
-import { buildSafeFtsQuery, tokenizeForFts } from './tokenizer.ts'
+import { buildRelaxedFtsQuery, buildSafeFtsQuery, tokenizeForFts } from './tokenizer.ts'
 import { MAX_CHUNKS_PER_DOC, MAX_CHUNKS_PER_KB, MAX_WIKI_FILE_BYTES } from './types.ts'
 import type {
   ChunkLocator,
@@ -72,6 +73,9 @@ export const LIST_DOCS_MAX_LIMIT = 200
 /** 单库检索候选池大小与硬上限：单库内先取 Top-60，再交 Host 侧重排（规格 §7.2）。 */
 export const SEARCH_FTS_DEFAULT_LIMIT = 60
 export const SEARCH_FTS_MAX_LIMIT = 60
+/** 切片窗口读取默认与硬上限（规格 §9.2：默认前后各 1，最多 5）。 */
+export const CHUNK_WINDOW_DEFAULT = 3
+export const CHUNK_WINDOW_MAX = 5
 /** 一批整理最多 10 份文档或 80 KB 切片文本（规格 §8.2）。 */
 export const ORGANIZE_BATCH_MAX_DOCS = 10
 export const ORGANIZE_BATCH_MAX_BYTES = 80 * 1024
@@ -150,9 +154,9 @@ const SCHEMA_STATEMENTS: readonly string[] = [
 ]
 
 const CONNECTION_PRAGMAS: readonly string[] = [
+  'PRAGMA busy_timeout = 5000',
   'PRAGMA journal_mode = WAL',
   'PRAGMA foreign_keys = ON',
-  'PRAGMA busy_timeout = 5000',
   'PRAGMA journal_size_limit = 33554432',
   'PRAGMA wal_autocheckpoint = 1000',
 ]
@@ -238,6 +242,7 @@ interface RebuildSnapshotDoc {
   readonly docId: string
   readonly wikiNotePath: string | null
   readonly organizedSha256: string | null
+  readonly extractConfigHash: string
 }
 
 interface RebuildSnapshot {
@@ -428,11 +433,70 @@ function performWikiReset(kbDir: string): boolean {
   return true
 }
 
-function ensureWikiResetPendingSync(kbDir: string): void {
+/**
+ * 判定 `wiki-reset.pending` 是否属于已过提交点（Step 2）的持久化标记（I-3 修复）。
+ * 已提交标记绝不可被后续未提交重建的崩溃恢复误删。
+ */
+function isCommittedWikiResetPending(pendingPath: string): boolean {
+  if (!existsSync(pendingPath)) return false
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(pendingPath, 'utf8'))
+    return parsed !== null && typeof parsed === 'object' && (parsed as { stage?: unknown }).stage === 'committed'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 落盘 `pre-commit` 阶段的 `wiki-reset.pending`。若磁盘上已存在标记（尤其是
+ * 上次已提交重建遗留的 `committed` 标记），绝不覆盖，并返回 `false` 表示本次
+ * 重建不是该标记的拥有者（取消/失败时不得删除）。
+ */
+function ensurePreCommitWikiResetPendingSync(kbDir: string): boolean {
   const target = wikiResetPendingPath(kbDir)
-  if (existsSync(target)) return
+  if (existsSync(target)) return false
   mkdirSync(kbDir, { recursive: true, mode: PRIVATE_DIR_MODE })
-  writeFileAtomicSync(target, `${JSON.stringify({ reason: 'corrupt-rebuild', at: new Date().toISOString() })}\n`)
+  writeFileAtomicSync(
+    target,
+    `${JSON.stringify({ stage: 'pre-commit', reason: 'corrupt-rebuild', at: new Date().toISOString() })}\n`,
+  )
+  return true
+}
+
+/** Step 2 提交点成功后把 `wiki-reset.pending` 提升为 `committed`（I-3）。 */
+function markWikiResetPendingCommittedSync(kbDir: string): void {
+  const target = wikiResetPendingPath(kbDir)
+  if (!existsSync(target) || isCommittedWikiResetPending(target)) return
+  writeFileAtomicSync(
+    target,
+    `${JSON.stringify({ stage: 'committed', reason: 'corrupt-rebuild', at: new Date().toISOString() })}\n`,
+  )
+}
+
+/**
+ * 把 `.bak*` 还原回主库（C-2 修复）：
+ * 先搬回 `.bak-wal` / `.bak-shm`，再把 `.bak` 原子重命名为 `index.sqlite`。
+ * 这样若在 WAL 已搬回但主库尚未搬回时崩溃，下次恢复仍见 `!main && backup` 继续
+ * 搬回主库；不会再出现「主库先回、WAL 滞留 `.bak-wal` 后被当作垃圾删掉」的数据丢失。
+ * 同时兜底兼容「主库已存在、主库无 WAL 但 `.bak-wal` 仍在」的残留半还原现场。
+ */
+function restoreBackupToMain(kbDir: string, opts?: CommitRebuildOptions): boolean {
+  const main = dbPath(kbDir)
+  const backup = `${main}${BACKUP_SUFFIX}`
+  const backupWal = `${backup}${WAL_SUFFIX}`
+  const backupShm = `${backup}${SHM_SUFFIX}`
+  const mainWal = `${main}${WAL_SUFFIX}`
+  const mainShm = `${main}${SHM_SUFFIX}`
+  if (!existsSync(main) && existsSync(backup)) {
+    opts?.failRestoreOldIndexForTest?.()
+    moveIfExists(backupWal, mainWal)
+    moveIfExists(backupShm, mainShm)
+    renameSync(backup, main)
+  } else if (existsSync(main) && !existsSync(mainWal) && existsSync(backupWal)) {
+    moveIfExists(backupWal, mainWal)
+    moveIfExists(backupShm, mainShm)
+  }
+  return existsSync(main) || !existsSync(backup)
 }
 
 /**
@@ -480,38 +544,30 @@ function assertHealthy(db: DatabaseSync): void {
  * @returns 仍处于 `wiki-reset-pending`（重置失败）时为 true。
  */
 export function recoverKnowledgeDbDir(kbDir: string): boolean {
-  const main = dbPath(kbDir)
-  const backup = `${main}${BACKUP_SUFFIX}`
-  const rebuild = `${main}${REBUILD_SUFFIX}`
+  const rebuild = rebuildDbPath(kbDir)
   const pending = wikiResetPendingPath(kbDir)
 
   if (existsSync(rebuild)) {
-    if (!existsSync(main) && existsSync(backup)) {
-      renameSync(backup, main)
-      moveIfExists(`${backup}${WAL_SUFFIX}`, `${main}${WAL_SUFFIX}`)
-      moveIfExists(`${backup}${SHM_SUFFIX}`, `${main}${SHM_SUFFIX}`)
+    // 未提交分支（Step 2 从未成功）：先 WAL 后主库安全还原 `.bak*`（C-2）。
+    restoreBackupToMain(kbDir)
+    removeStagingFiles(kbDir)
+    removeBackups(kbDir)
+    // I-3 修复：已过上次提交点的 `committed` pending 必须保留并续做；
+    // 只有本次未提交重建留下的 `pre-commit`（或旧格式无 stage）才清理。
+    if (isCommittedWikiResetPending(pending)) {
+      const wikiResetPending = !performWikiReset(kbDir)
+      clearWikiStale(kbDir)
+      return wikiResetPending
     }
-    removeIfExists(rebuild)
-    removeIfExists(`${rebuild}${WAL_SUFFIX}`)
-    removeIfExists(`${rebuild}${SHM_SUFFIX}`)
-    removeIfExists(backup)
-    removeIfExists(`${backup}${WAL_SUFFIX}`)
-    removeIfExists(`${backup}${SHM_SUFFIX}`)
-    // 未提交分支：`wiki-reset.pending` 属于这次被放弃的重建，必须清掉，
-    // 否则下次启动会误重置完好的旧 `wiki/`。
     removeIfExists(pending)
     return false
   }
 
-  // C-2 安全网：即使 `.rebuild` 缺失，只要主库不在且 `.bak` 仍在，先还原 `.bak*` 再继续，绝不删掉唯一备份。
-  if (!existsSync(main) && existsSync(backup)) {
-    renameSync(backup, main)
-    moveIfExists(`${backup}${WAL_SUFFIX}`, `${main}${WAL_SUFFIX}`)
-    moveIfExists(`${backup}${SHM_SUFFIX}`, `${main}${SHM_SUFFIX}`)
-  }
-  removeIfExists(backup)
-  removeIfExists(`${backup}${WAL_SUFFIX}`)
-  removeIfExists(`${backup}${SHM_SUFFIX}`)
+  // C-2 安全网：即使 `.rebuild` 缺失，只要主库不在且 `.bak` 仍在（或残留 `.bak-wal`），先还原再清理。
+  restoreBackupToMain(kbDir)
+  // M-3：顺带清扫可能残留的 `.rebuild-wal` / `.rebuild-shm`。
+  removeStagingFiles(kbDir)
+  removeBackups(kbDir)
   const wikiResetPending = existsSync(pending) ? !performWikiReset(kbDir) : false
   clearWikiStale(kbDir)
   return wikiResetPending
@@ -520,6 +576,9 @@ export function recoverKnowledgeDbDir(kbDir: string): boolean {
 function openVerifiedConnection(kbDir: string, ensureSchema: boolean): DatabaseSync {
   const db = new DatabaseSync(dbPath(kbDir))
   try {
+    // I-3 修复：先置 `busy_timeout = 5000`，再跑 `quick_check` 与其余 PRAGMA，
+    // 防止另一进程/杀毒软件短锁导致 `quick_check` 立即 SQLITE_BUSY 误判 index-error。
+    db.exec('PRAGMA busy_timeout = 5000')
     assertHealthy(db)
     applyConnectionPragmas(db)
     if (ensureSchema) initializeSchema(db)
@@ -588,7 +647,8 @@ function deleteDocumentRow(
   wikiNotePath: string | null,
   nowMs: number,
 ): boolean {
-  db.prepare('DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE doc_id = ?)').run(docId)
+  // I-7 修复：按对齐后的 `chunks.rowid` 主键删 FTS 行（O(k)），避免 UNINDEXED `chunk_id` 全表扫描。
+  db.prepare('DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE doc_id = ?)').run(docId)
   db.prepare('DELETE FROM documents WHERE doc_id = ?').run(docId)
   if (wikiNotePath === null) return false
   db.prepare(
@@ -601,7 +661,7 @@ function deleteDocumentRow(
 
 function planForExistingDocument(db: DatabaseSync, relPath: string, input: UpsertDocumentInput): DocumentWritePlan {
   const row = db.prepare(
-    `SELECT doc_id, sha256, wiki_note_path, organized_sha256, organize_attempts,
+    `SELECT doc_id, sha256, extract_config_hash, wiki_note_path, organized_sha256, organize_attempts,
             organize_retry_after, last_organize_error
        FROM documents WHERE rel_path = ?`,
   ).get(relPath)
@@ -615,7 +675,9 @@ function planForExistingDocument(db: DatabaseSync, relPath: string, input: Upser
       lastOrganizeError: null,
     }
   }
+  // M-3 修复：同时比较 `sha256` 与 `extract_config_hash`，避免提取配置升级后沿用旧整理指纹。
   const sameContent = text(row['sha256']) === input.sha256
+    && text(row['extract_config_hash']) === input.extractConfigHash
   return {
     docId: text(row['doc_id']),
     wikiNotePath: textOrNull(row['wiki_note_path']),
@@ -654,7 +716,7 @@ function writeDocument(
     const chunks = input.chunks.slice(0, perDocCap)
     const chunkCapExceeded = chunks.length < input.chunks.length
 
-    db.prepare('DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE doc_id = ?)').run(plan.docId)
+    db.prepare('DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE doc_id = ?)').run(plan.docId)
     db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(plan.docId)
 
     const status = chunkCapExceeded ? 'partial' : input.status
@@ -692,20 +754,27 @@ function writeDocument(
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     const insertFts = db.prepare(
-      'INSERT INTO chunks_fts (chunk_id, rel_path, heading_path, tokenized) VALUES (?, ?, ?, ?)',
+      'INSERT INTO chunks_fts (rowid, chunk_id, rel_path, heading_path, tokenized) VALUES (?, ?, ?, ?, ?)',
     )
     // 规格 §7.2：rel_path 与 heading_path 也写预处理结果；切片正文的 tokenized
     // 由调用方（Extraction Worker）给好，存储层逐字信任、不重复分词。
+    // I-7 修复：显式对齐 `chunks_fts.rowid = chunks.rowid`，删改按 rowid O(k) 定位。
     const tokenizedRelPath = tokenizeForFts(input.relPath)
     const chunkIds: string[] = []
     for (const chunk of chunks) {
       const chunkId = randomUUID()
       chunkIds.push(chunkId)
-      insertChunk.run(
+      const inserted = insertChunk.run(
         chunkId, plan.docId, chunk.ordinal, chunk.headingPath,
         JSON.stringify(chunk.locator), chunk.content, chunk.tokenized, chunk.charCount,
       )
-      insertFts.run(chunkId, tokenizedRelPath, tokenizeForFts(chunk.headingPath), chunk.tokenized)
+      insertFts.run(
+        inserted.lastInsertRowid,
+        chunkId,
+        tokenizedRelPath,
+        tokenizeForFts(chunk.headingPath),
+        chunk.tokenized,
+      )
     }
 
     return { docId: plan.docId, chunkIds, chunkCapExceeded }
@@ -749,7 +818,7 @@ export function renameDocument(
       input.toRelPath, input.toNormPath, Date.now(), docId,
     )
     db.prepare(
-      'UPDATE chunks_fts SET rel_path = ? WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE doc_id = ?)',
+      'UPDATE chunks_fts SET rel_path = ? WHERE rowid IN (SELECT rowid FROM chunks WHERE doc_id = ?)',
     ).run(tokenizeForFts(input.toRelPath), docId)
   })
   return { renamed: true, docId }
@@ -828,7 +897,7 @@ export function listDocs(db: DatabaseSync, filter?: ListDocsFilter): ListDocsRes
 
   const total = integer(db.prepare(`SELECT COUNT(*) AS total FROM documents d${whereSql}`).get(...params)?.['total'])
   const limit = clampInteger(filter?.limit, LIST_DOCS_DEFAULT_LIMIT, 1, LIST_DOCS_MAX_LIMIT)
-  const offset = Math.max(0, Math.trunc(filter?.offset ?? 0))
+  const offset = clampInteger(filter?.offset, 0, 0, Number.MAX_SAFE_INTEGER)
   const rows = db.prepare(
     `SELECT d.doc_id, d.rel_path, d.norm_path, d.sha256, d.size, d.mtime_ms, d.format, d.extract_mode,
             d.extract_config_hash, d.status, d.status_reason, d.wiki_note_path, d.organized_sha256,
@@ -842,14 +911,15 @@ export function listDocs(db: DatabaseSync, filter?: ListDocsFilter): ListDocsRes
 }
 
 /**
- * 单库全文检索的候选池（规格 §7.2）：查询经 `buildSafeFtsQuery` 剥掉运算符并
- * 逐词加引号，结果按 BM25 升序取前 `limit`（缺省 60）。
+ * 单库全文检索的候选池（规格 §7.2 / I-7 修复）：先执行严格 bigram 查询，0 命中时
+ * 仅对含 ≥3 字连续汉字串的查询降级执行全单字 AND 查询（如「基金税率」命中
+ * 「该基金的赎回税率为1.5%」），结果按 BM25 升序取前 `limit`（缺省 60）。
  */
 export function searchFts(db: DatabaseSync, query: SearchFtsQuery): readonly SingleKbCandidate[] {
-  const match = buildSafeFtsQuery(query.query)
-  if (match === '') return []
+  const strictMatch = buildSafeFtsQuery(query.query)
+  if (strictMatch === '') return []
   const limit = clampInteger(query.limit, SEARCH_FTS_DEFAULT_LIMIT, 1, SEARCH_FTS_MAX_LIMIT)
-  const rows = db.prepare(
+  const stmt = db.prepare(
     `SELECT c.chunk_id AS chunk_id, c.doc_id AS doc_id, c.ordinal AS ordinal,
             c.heading_path AS heading_path, c.locator_json AS locator_json, c.content AS content,
             d.rel_path AS rel_path, d.sha256 AS sha256, d.extract_config_hash AS extract_config_hash,
@@ -861,7 +931,14 @@ export function searchFts(db: DatabaseSync, query: SearchFtsQuery): readonly Sin
       WHERE chunks_fts MATCH ?
       ORDER BY bm25 ASC, d.rel_path ASC, c.ordinal ASC
       LIMIT ?`,
-  ).all(match, limit)
+  )
+  let rows = stmt.all(strictMatch, limit)
+  if (rows.length === 0) {
+    const relaxedMatch = buildRelaxedFtsQuery(query.query)
+    if (relaxedMatch !== '' && relaxedMatch !== strictMatch) {
+      rows = stmt.all(relaxedMatch, limit)
+    }
+  }
   return rows.map((row) => ({
     kbId: query.kbId,
     kbName: query.kbName,
@@ -911,8 +988,12 @@ export function getChunkWithWindow(db: DatabaseSync, query: GetChunkWindowQuery)
     return { status: 'version-mismatch', kbId, docId: query.docId, currentSha256: sha256, currentExtractConfigHash: extractConfigHash }
   }
 
-  const window = Math.max(1, Math.trunc(query.window))
-  const targetOrdinal = Math.max(0, Math.trunc(query.ordinal))
+  // I-6 修复：负值或非有限 ordinal 必须判 `chunk-missing`，不可钳位到 0 误返 ok；window 收敛到 [1, 5]。
+  if (!Number.isFinite(query.ordinal) || Math.trunc(query.ordinal) < 0) {
+    return { status: 'chunk-missing', kbId, docId: query.docId }
+  }
+  const targetOrdinal = Math.trunc(query.ordinal)
+  const window = clampInteger(query.window, CHUNK_WINDOW_DEFAULT, 1, CHUNK_WINDOW_MAX)
   const start = Math.max(0, targetOrdinal - Math.floor(window / 2))
   const chunks = db.prepare(
     `SELECT chunk_id, ordinal, heading_path, locator_json, content
@@ -944,8 +1025,8 @@ export function getDocChunks(
   startOrdinal: number,
   limit: number,
 ): readonly ChunkWindowItem[] {
-  const start = Math.max(0, Math.trunc(startOrdinal))
-  const take = Math.max(1, Math.trunc(limit))
+  const start = clampInteger(startOrdinal, 0, 0, Number.MAX_SAFE_INTEGER)
+  const take = clampInteger(limit, LIST_DOCS_DEFAULT_LIMIT, 1, MAX_CHUNKS_PER_DOC)
   return db.prepare(
     `SELECT chunk_id, ordinal, heading_path, locator_json, content
        FROM chunks WHERE doc_id = ? AND ordinal >= ? ORDER BY ordinal ASC LIMIT ?`,
@@ -1056,7 +1137,8 @@ export function getPendingOrganizeBatch(db: DatabaseSync, query: PendingOrganize
   const rows = db.prepare(
     `SELECT d.doc_id AS doc_id, d.rel_path AS rel_path, d.sha256 AS sha256,
             d.wiki_note_path AS wiki_note_path,
-            COALESCE((SELECT SUM(c.char_count) FROM chunks c WHERE c.doc_id = d.doc_id), 0) AS char_count
+            COALESCE((SELECT SUM(c.char_count) FROM chunks c WHERE c.doc_id = d.doc_id), 0) AS char_count,
+            COALESCE((SELECT SUM(LENGTH(CAST(c.content AS BLOB))) FROM chunks c WHERE c.doc_id = d.doc_id), 0) AS byte_count
        FROM documents d
       WHERE ${ORGANIZE_PENDING_SQL}
         AND (d.organize_retry_after IS NULL OR d.organize_retry_after <= ?)
@@ -1068,8 +1150,10 @@ export function getPendingOrganizeBatch(db: DatabaseSync, query: PendingOrganize
   let bytes = 0
   for (const row of rows) {
     const charCount = integer(row['char_count'])
-    if (docs.length > 0 && bytes + charCount > maxBytes) break
-    bytes += charCount
+    // M-3 修复：按实际 UTF-8 字节数对照 80 KB 预算，避免中文按字符数放行 3 倍体积。
+    const byteCount = integer(row['byte_count'])
+    if (docs.length > 0 && bytes + byteCount > maxBytes) break
+    bytes += byteCount
     docs.push({
       docId: text(row['doc_id']),
       relPath: text(row['rel_path']),
@@ -1139,39 +1223,72 @@ interface StagingState {
 
 const stagingStates = new WeakMap<RebuildStaging, StagingState>()
 
+function isTransientLockError(error: unknown): boolean {
+  const msg = errorMessage(error).toLowerCase()
+  const code = typeof error === 'object' && error !== null
+    ? String((error as { code?: unknown }).code ?? '')
+    : ''
+  return code === 'EBUSY'
+    || code === 'EACCES'
+    || code === 'EPERM'
+    || msg.includes('database is locked')
+    || msg.includes('database table is locked')
+    || msg.includes('sqlite_busy')
+    || msg.includes('sqlite_locked')
+    || msg.includes('readonly')
+}
+
+function readSnapshotFromDb(db: DatabaseSync): RebuildSnapshot {
+  assertHealthy(db)
+  const docs = new Map<string, RebuildSnapshotDoc>()
+  for (const row of db.prepare(
+    'SELECT doc_id, rel_path, wiki_note_path, organized_sha256, extract_config_hash FROM documents',
+  ).all()) {
+    docs.set(text(row['rel_path']), {
+      docId: text(row['doc_id']),
+      wikiNotePath: textOrNull(row['wiki_note_path']),
+      organizedSha256: textOrNull(row['organized_sha256']),
+      extractConfigHash: text(row['extract_config_hash']),
+    })
+  }
+  // I-12：正常重建保留 `wiki/`，必须把旧库已存在的整理墓碑一并迁移到新库。
+  const tombstones: OrganizeTombstoneRecord[] = db.prepare(
+    'SELECT doc_id, rel_path, wiki_note_path, deleted_at FROM organize_tombstones',
+  ).all().map((row): OrganizeTombstoneRecord => ({
+    docId: text(row['doc_id']),
+    relPath: text(row['rel_path']),
+    wikiNotePath: textOrNull(row['wiki_note_path']),
+    deletedAt: integer(row['deleted_at']),
+  }))
+  return { corruptRecovery: false, docs, tombstones }
+}
+
 /**
- * 从旧库只读抽取重建快照（含既有 `organize_tombstones`）。旧库缺失视为
- * 「无旧映射」（正常新建）；旧库存在但打不开 / `quick_check` 失败则标记为
- * 损坏恢复重建。
+ * 从旧库只读抽取重建快照（含既有 `organize_tombstones`）。
+ * - 若调用方传入已打开的 `existingLiveDb`（如 Storage Worker），直接复用该连接读取，
+ *   避免 Windows/WAL 下另开 `busy_timeout = 0` 连接误报损坏（I-3）；
+ * - 遇到瞬时锁冲突（`SQLITE_BUSY` / `SQLITE_LOCKED` / `EBUSY`）时直接上抛失败，
+ *   绝不误判为 `corruptRecovery: true` 而清空用户 `wiki/`（I-3）；
+ * - 旧库缺失视为正常新建；旧库存在且确认损坏则标记 `corruptRecovery: true`。
  */
-function readRebuildSnapshot(kbDir: string): RebuildSnapshot {
+function readRebuildSnapshot(kbDir: string, existingLiveDb?: DatabaseSync): RebuildSnapshot {
+  if (existingLiveDb !== undefined) {
+    try {
+      return readSnapshotFromDb(existingLiveDb)
+    } catch (error) {
+      if (isTransientLockError(error)) throw error
+      return { corruptRecovery: true, docs: new Map(), tombstones: [] }
+    }
+  }
   const main = dbPath(kbDir)
   if (!existsSync(main)) return { corruptRecovery: false, docs: new Map(), tombstones: [] }
   let db: DatabaseSync | undefined
   try {
     db = new DatabaseSync(main, { readOnly: true })
-    assertHealthy(db)
-    const docs = new Map<string, RebuildSnapshotDoc>()
-    for (const row of db.prepare(
-      'SELECT doc_id, rel_path, wiki_note_path, organized_sha256 FROM documents',
-    ).all()) {
-      docs.set(text(row['rel_path']), {
-        docId: text(row['doc_id']),
-        wikiNotePath: textOrNull(row['wiki_note_path']),
-        organizedSha256: textOrNull(row['organized_sha256']),
-      })
-    }
-    // I-12：正常重建保留 `wiki/`，必须把旧库已存在的整理墓碑一并迁移到新库。
-    const tombstones: OrganizeTombstoneRecord[] = db.prepare(
-      'SELECT doc_id, rel_path, wiki_note_path, deleted_at FROM organize_tombstones',
-    ).all().map((row): OrganizeTombstoneRecord => ({
-      docId: text(row['doc_id']),
-      relPath: text(row['rel_path']),
-      wikiNotePath: textOrNull(row['wiki_note_path']),
-      deletedAt: integer(row['deleted_at']),
-    }))
-    return { corruptRecovery: false, docs, tombstones }
-  } catch {
+    db.exec('PRAGMA busy_timeout = 5000')
+    return readSnapshotFromDb(db)
+  } catch (error) {
+    if (isTransientLockError(error)) throw error
     return { corruptRecovery: true, docs: new Map(), tombstones: [] }
   } finally {
     if (db !== undefined) {
@@ -1201,25 +1318,68 @@ function removeStagingFiles(kbDir: string): void {
   removeIfExists(`${staging}${SHM_SUFFIX}`)
 }
 
-function closeStaging(state: StagingState): void {
+function closeStagingBestEffort(state: StagingState): void {
   if (state.closed) return
   state.closed = true
   try {
     checkpoint(state.db)
   } catch {
-    // 收尾 checkpoint 失败不阻断：关闭仍会尝试把 WAL 落盘。
+    // 放弃/错误路径上的收尾 checkpoint 尽力而为。
   }
   state.db.close()
 }
 
 /**
- * 开始一次重建：在隔离文件 `index.sqlite.rebuild` 上建同 Schema/PRAGMA 的暂存
- * 库，并只读抽取旧库快照供 `doc_id` / `wiki_note_path` / `organized_sha256`
- * 继承。损坏恢复重建在返回前落盘 `wiki-reset.pending`（提交前必备）。
+ * 提交前严格 checkpoint 并关闭暂存库（I-3 修复）：
+ * 确认 `wal_checkpoint(TRUNCATE)` 返回 `busy === 0 && log === checkpointed` 且
+ * `.rebuild-wal` 已归零或移除，否则在提交点前抛错，避免 Step 2 只重命名主库
+ * 而把未合入的 WAL 留在 `.rebuild-wal` 导致新库丢数据。
  */
-export function beginRebuildStaging(kbDir: string): RebuildStaging {
+function closeStagingForCommit(state: StagingState): void {
+  if (state.closed) return
+  state.closed = true
+  let busy = 1
+  let log = -1
+  let checkpointed = -2
+  try {
+    const row = state.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+    busy = integer(row?.['busy'])
+    log = integer(row?.['log'])
+    checkpointed = integer(row?.['checkpointed'])
+  } finally {
+    state.db.close()
+  }
+  if (busy !== 0 || log !== checkpointed) {
+    throw new Error(
+      `knowledge rebuild staging checkpoint incomplete (busy=${String(busy)}, log=${String(log)}, checkpointed=${String(checkpointed)})`,
+    )
+  }
+  const stagingWal = `${rebuildDbPath(state.kbDir)}${WAL_SUFFIX}`
+  if (existsSync(stagingWal)) {
+    const walInfo = lstatSync(stagingWal)
+    if (walInfo.size > 0) {
+      throw new Error(`knowledge rebuild staging WAL still has ${String(walInfo.size)} uncheckpointed bytes`)
+    }
+  }
+}
+
+/**
+ * 开始一次重建：若上次重建双失败留下了 `!main && .bak`，先安全还原旧库再读快照
+ * （C-2 修复）；随后在隔离文件 `index.sqlite.rebuild` 上建同 Schema/PRAGMA 的暂存
+ * 库，并只读抽取旧库快照供 `doc_id` / `wiki_note_path` / `organized_sha256` 继承。
+ * 损坏恢复重建在返回前落盘 `pre-commit` 状态的 `wiki-reset.pending`。
+ */
+export function beginRebuildStaging(kbDir: string, existingLiveDb?: DatabaseSync): RebuildStaging {
   mkdirSync(kbDir, { recursive: true, mode: PRIVATE_DIR_MODE })
-  const snapshot = readRebuildSnapshot(kbDir)
+  const main = dbPath(kbDir)
+  const backup = `${main}${BACKUP_SUFFIX}`
+  if (!existsSync(main) && existsSync(backup)) {
+    if (!restoreBackupToMain(kbDir)) {
+      throw new Error('knowledge index backup could not be restored before rebuild')
+    }
+    removeBackups(kbDir)
+  }
+  const snapshot = readRebuildSnapshot(kbDir, existingLiveDb)
   removeStagingFiles(kbDir)
   const stagingFile = rebuildDbPath(kbDir)
   const db = new DatabaseSync(stagingFile)
@@ -1259,6 +1419,7 @@ export function beginRebuildStaging(kbDir: string): RebuildStaging {
         organizedSha256: inherited !== undefined
           && inherited.organizedSha256 !== null
           && inherited.organizedSha256 === input.sha256
+          && inherited.extractConfigHash === input.extractConfigHash
           && isUsableWikiCard(kbDir, docId)
           ? inherited.organizedSha256
           : null,
@@ -1279,51 +1440,59 @@ export function beginRebuildStaging(kbDir: string): RebuildStaging {
   stagingStates.set(staging, state)
 
   if (snapshot.corruptRecovery) {
-    // 规格 §6.4：损坏恢复重建必须在进入提交点前落盘 pending。
-    ensureWikiResetPendingSync(kbDir)
-    state.pendingWritten = true
+    // 规格 §6.4 / I-3：损坏恢复重建必须在进入提交点前落盘 pre-commit pending；
+    // 若已有 committed pending，则不覆盖也不认领其删除权。
+    state.pendingWritten = ensurePreCommitWikiResetPendingSync(kbDir)
   }
   return staging
 }
 
 function abortStaging(state: StagingState): void {
   try {
-    closeStaging(state)
+    closeStagingBestEffort(state)
   } catch {
     // 暂存库已被关闭或损坏，忽略。
   }
   removeStagingFiles(state.kbDir)
-  if (state.pendingWritten) removeIfExists(wikiResetPendingPath(state.kbDir))
+  const pendingPath = wikiResetPendingPath(state.kbDir)
+  if (state.pendingWritten && !isCommittedWikiResetPending(pendingPath)) {
+    removeIfExists(pendingPath)
+  }
 }
 
-/** 放弃重建：关闭并删除暂存文件；未提交的 pending 标记一并清理。 */
+/** 放弃重建：关闭并删除暂存文件；未提交的 pending 标记一并清理（C-2 保护 `.bak` 恢复标志）。 */
 export function abortRebuildStaging(kbDir: string, staging: RebuildStaging): void {
   const state = stagingStates.get(staging)
   if (state === undefined) {
-    removeStagingFiles(kbDir)
+    // C-2 修复：若上次双失败留下了 `!main && .bak`，`.rebuild` 是未提交恢复标志，绝不误删。
+    if (existsSync(dbPath(kbDir)) || !existsSync(`${dbPath(kbDir)}${BACKUP_SUFFIX}`)) {
+      removeStagingFiles(kbDir)
+    }
     return
   }
   abortStaging(state)
   stagingStates.delete(staging)
 }
 
-/** 复制旧库既有整理墓碑，并为快照里消失且带 Wiki 卡片的文档补写墓碑。 */
+/** 复制旧库既有整理墓碑，并为快照里消失且带 Wiki 卡片的文档补写墓碑（M-3 单事务落盘）。 */
 function insertVanishedTombstones(state: StagingState): void {
   const now = Date.now()
-  const insert = state.db.prepare(
-    `INSERT INTO organize_tombstones (doc_id, rel_path, wiki_note_path, deleted_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(doc_id) DO UPDATE SET rel_path = excluded.rel_path,
-       wiki_note_path = excluded.wiki_note_path, deleted_at = excluded.deleted_at`,
-  )
-  for (const existing of state.tombstones) {
-    if (state.insertedDocIds.has(existing.docId)) continue
-    insert.run(existing.docId, existing.relPath, existing.wikiNotePath, existing.deletedAt)
-  }
-  for (const [relPath, doc] of state.snapshot) {
-    if (state.relPaths.has(relPath)) continue
-    if (doc.wikiNotePath === null) continue
-    insert.run(doc.docId, relPath, doc.wikiNotePath, now)
-  }
+  inImmediateTransaction(state.db, () => {
+    const insert = state.db.prepare(
+      `INSERT INTO organize_tombstones (doc_id, rel_path, wiki_note_path, deleted_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(doc_id) DO UPDATE SET rel_path = excluded.rel_path,
+         wiki_note_path = excluded.wiki_note_path, deleted_at = excluded.deleted_at`,
+    )
+    for (const existing of state.tombstones) {
+      if (state.insertedDocIds.has(existing.docId)) continue
+      insert.run(existing.docId, existing.relPath, existing.wikiNotePath, existing.deletedAt)
+    }
+    for (const [relPath, doc] of state.snapshot) {
+      if (state.relPaths.has(relPath)) continue
+      if (doc.wikiNotePath === null) continue
+      insert.run(doc.docId, relPath, doc.wikiNotePath, now)
+    }
+  })
 }
 
 /** Step 1：旧主库与伴随 WAL/SHM 一并移为 `.bak*`（提交前回滚零数据损失）。 */
@@ -1334,20 +1503,10 @@ function moveOldIndexToBackup(kbDir: string): void {
   moveIfExists(`${main}${SHM_SUFFIX}`, `${main}${BACKUP_SUFFIX}${SHM_SUFFIX}`)
 }
 
-/** 提交前失败：把 `.bak*` 搬回主库；返回主库是否已确认安全还原（未还原时绝不删 `.bak*`）。 */
+/** 提交前失败：先搬回 WAL/SHM 再把 `.bak` 搬回主库；未确认主库就位绝不删 `.bak*`（C-2）。 */
 function restoreOldIndex(kbDir: string, opts?: CommitRebuildOptions): boolean {
-  const main = dbPath(kbDir)
-  const backup = `${main}${BACKUP_SUFFIX}`
-  if (!existsSync(main) && existsSync(backup)) {
-    opts?.failRestoreOldIndexForTest?.()
-    renameSync(backup, main)
-    moveIfExists(`${backup}${WAL_SUFFIX}`, `${main}${WAL_SUFFIX}`)
-    moveIfExists(`${backup}${SHM_SUFFIX}`, `${main}${SHM_SUFFIX}`)
-  }
-  if (!existsSync(main) && existsSync(backup)) return false
-  removeIfExists(backup)
-  removeIfExists(`${backup}${WAL_SUFFIX}`)
-  removeIfExists(`${backup}${SHM_SUFFIX}`)
+  if (!restoreBackupToMain(kbDir, opts)) return false
+  removeBackups(kbDir)
   return true
 }
 
@@ -1378,7 +1537,7 @@ function discardStagingAfterFailure(
 ): void {
   stagingStates.delete(staging)
   try {
-    closeStaging(state)
+    closeStagingBestEffort(state)
   } catch {
     // 暂存连接已关闭或已损坏，忽略。
   }
@@ -1388,9 +1547,10 @@ function discardStagingAfterFailure(
   } catch {
     // 清理失败不改变提交前语义：旧库已回滚（或尽力回滚）。
   }
-  if (state.pendingWritten) {
+  const pendingPath = wikiResetPendingPath(state.kbDir)
+  if (state.pendingWritten && !isCommittedWikiResetPending(pendingPath)) {
     try {
-      removeIfExists(wikiResetPendingPath(state.kbDir))
+      removeIfExists(pendingPath)
     } catch {
       // 未提交的 pending 由启动恢复的未提交分支清理。
     }
@@ -1399,13 +1559,13 @@ function discardStagingAfterFailure(
 
 /**
  * 提交一次重建（规格 §6.4 提交点协议）：
- * 1. 暂存库 `wal_checkpoint(TRUNCATE)` 并关闭；补写消失文件的整理墓碑；
- * 2. 损坏恢复重建在提交前落盘 `wiki-reset.pending`（`0o600`）；
+ * 1. 暂存库单事务补写消失文件墓碑，严格验证 `wal_checkpoint(TRUNCATE)` 归零后关闭；
+ * 2. 损坏恢复重建在提交前落盘 `pre-commit` 状态的 `wiki-reset.pending`（`0o600`）；
  * 3. Step 1 把旧 `index.sqlite(-wal/-shm)` 移为 `.bak*`；
  * 4. Step 2 `rename(index.sqlite.rebuild, index.sqlite)` 是唯一提交点；
- * 5. 提交前任何失败都回滚旧库并返回 `rebuild-failed`（回滚也失败则保留 `.bak` 与 `.rebuild`）；
- * 6. 提交后：暂存清理只是尽力而为的警告（日志），Wiki 幂等重置 / 清理备份 /
- *    重开新库；重开失败绝不回滚旧库，返回 `index-error`。
+ * 5. 提交前任何失败都先 WAL 后主库回滚旧库并返回 `rebuild-failed`（回滚失败保留 `.bak` 与 `.rebuild`）；
+ * 6. 提交后把 `wiki-reset.pending` 提升为 `committed`、尽力清理暂存与备份、幂等重置 Wiki 并重开新库；
+ *    重开失败绝不回滚旧库，返回 `index-error`。
  */
 export function commitRebuildStaging(
   kbDir: string,
@@ -1419,10 +1579,9 @@ export function commitRebuildStaging(
   try {
     corruptRecovery = staging.corruptRecovery
     insertVanishedTombstones(state)
-    closeStaging(state)
-    if (corruptRecovery) {
-      ensureWikiResetPendingSync(kbDir)
-      state.pendingWritten = true
+    closeStagingForCommit(state)
+    if (corruptRecovery && !state.pendingWritten) {
+      state.pendingWritten = ensurePreCommitWikiResetPendingSync(kbDir)
     }
   } catch (error) {
     discardStagingAfterFailure(state, staging, true)
@@ -1447,6 +1606,11 @@ export function commitRebuildStaging(
 
   // Step 2 已成功：以下收尾绝不回滚新库，清理错误也不得改判为提交失败。
   stagingStates.delete(staging)
+  try {
+    markWikiResetPendingCommittedSync(kbDir)
+  } catch (error) {
+    console.warn(`[knowledge] failed to mark wiki-reset.pending committed: ${errorMessage(error)}`)
+  }
   try {
     opts?.afterCommitCleanupForTest?.()
     removeStagingFiles(kbDir)

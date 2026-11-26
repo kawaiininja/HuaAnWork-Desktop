@@ -110,9 +110,18 @@ async function loadPdfjs(): Promise<PdfJsModule> {
       const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
       pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href
       return pdfjs
-    })()
+    })().catch((error: unknown) => {
+      // 瞬时加载失败不得永久缓存（M-5）。
+      pdfjsModulePromise = undefined
+      throw error
+    })
   }
   return pdfjsModulePromise
+}
+
+function isPdfPasswordError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  return (error as { name?: unknown }).name === 'PasswordException'
 }
 
 /** `pdfjs-dist` 包根（cmaps 与 standard_fonts 的父目录）。 */
@@ -163,7 +172,7 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
   let loadingTask: PdfLoadingTask
   try {
     loadingTask = pdfjs.getDocument({
-      data: new Uint8Array(input.buffer),
+      data: new Uint8Array(input.buffer.buffer, input.buffer.byteOffset, input.buffer.byteLength),
       cMapUrl: `${join(pdfPackageRoot(), 'cmaps')}/`,
       cMapPacked: true,
       standardFontDataUrl: `${join(pdfPackageRoot(), 'standard_fonts')}/`,
@@ -172,7 +181,16 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
       isOffscreenCanvasSupported: false,
       isImageDecoderSupported: false,
     })
-  } catch {
+  } catch (error) {
+    if (isPdfPasswordError(error)) {
+      return {
+        ...base,
+        extractMode: 'none',
+        status: 'skipped',
+        statusReason: 'encrypted',
+        sections: [],
+      }
+    }
     return {
       ...base,
       extractMode: 'none',
@@ -185,6 +203,16 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
   try {
     const pdf = await loadingTask.promise
     const totalPages = pdf.numPages
+    if (totalPages === 0) {
+      return {
+        ...base,
+        extractMode: 'text',
+        status: 'indexed',
+        sections: [],
+        totalPages: 0,
+        parsedPages: 0,
+      }
+    }
     const sections: ExtractedSection[] = []
     let textPages = 0
     let needsVisionPages = 0
@@ -250,7 +278,7 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
     if (truncated) {
       return {
         ...base,
-        extractMode: 'text',
+        extractMode: needsVisionPages > 0 ? 'mixed' : 'text',
         status: 'partial',
         statusReason: 'text-truncated',
         sections,
@@ -266,7 +294,16 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
       totalPages,
       parsedPages: textPages,
     }
-  } catch {
+  } catch (error) {
+    if (isPdfPasswordError(error)) {
+      return {
+        ...base,
+        extractMode: 'none',
+        status: 'skipped',
+        statusReason: 'encrypted',
+        sections: [],
+      }
+    }
     return {
       ...base,
       extractMode: 'none',

@@ -499,8 +499,8 @@
       "skills/**",
       "!node_modules/node-pty/build/**",
       "!node_modules/fs-ext/build/**",
-      "!node_modules/@napi-rs/canvas/**",
-      "!node_modules/@napi-rs/canvas-*/**"
+      "!**/node_modules/@napi-rs/canvas/**",
+      "!**/node_modules/@napi-rs/canvas-*/**"
     ],
     "mac": {
       "artifactName": "HuaAnWork-${version}-${arch}.${ext}",

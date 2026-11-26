@@ -239,3 +239,122 @@ export function buildEncryptedZipBuffer(): Buffer {
     },
   ])
 }
+
+/** C-3 / M-5 回归：含自闭合空单元格 `<c r="A1" s="3"/>`、自闭合 `<row/>`、多 `<t>` 内联串、单引号属性与非顺序 `workbook.xml.rels`。 */
+export function buildRichSelfClosingXlsx(): Buffer {
+  const workbookXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + "<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main' "
+    + "xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>"
+    + "<sheets><sheet name='风控总表' sheetId='1' r:id='rId2'/><sheet name='附表甲' sheetId='2' r:id='rId1'/></sheets>"
+    + '</workbook>'
+  const relsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + "<Relationship Id='rId1' Target='worksheets/sheet1.xml'/>"
+    + "<Relationship Id='rId2' Target='worksheets/sheet2.xml'/>"
+    + '</Relationships>'
+  const sharedStringsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    + '<si><t>列头甲</t></si>'
+    + '<si><t>第一条关键数据</t></si>'
+    + '<si><t/>'
+    + '<t>空后拼接</t></si>'
+    + '</sst>'
+  const sheet1Xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+    + '<row r="1"><c r="A1" s="3"/><c r="B1" t="s"><v>0</v></c></row>'
+    + '<row r="2"/>'
+    + '<row r="5"><c r="A5" s="1"/><c r="B5" t="s"><v>1</v></c><c r="C5" t="inlineStr"><is><r><t>合</t></r><r><t>规</t></r></is></c></row>'
+    + '</sheetData></worksheet>'
+  const sheet2Xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+    + '<row r="1"><c r="A1" t="s"><v>2</v></c></row>'
+    + '</sheetData></worksheet>'
+  return buildZipBuffer([
+    { name: '[Content_Types].xml', data: Buffer.from(CONTENT_TYPES_XML, 'utf8'), method: ZIP_METHOD_STORED },
+    { name: 'xl/workbook.xml', data: Buffer.from(workbookXml, 'utf8') },
+    { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from(relsXml, 'utf8') },
+    { name: 'xl/sharedStrings.xml', data: Buffer.from(sharedStringsXml, 'utf8') },
+    { name: 'xl/worksheets/sheet1.xml', data: Buffer.from(sheet1Xml, 'utf8') },
+    { name: 'xl/worksheets/sheet2.xml', data: Buffer.from(sheet2Xml, 'utf8') },
+  ])
+}
+
+/** I-8 回归：含真实 `<w:tab/>`、`<w:br/>`、自闭合 `<w:t/>` 与字面 `&lt;w:br/&gt;` 的 DOCX。 */
+export function buildDocxWithTabsAndBreaks(): Buffer {
+  const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    + '<w:p><w:r><w:t>列一</w:t><w:tab/><w:t>列二</w:t><w:br/><w:t/>'
+    + '<w:t>字面&lt;w:br/&gt;保持原样</w:t></w:r></w:p>'
+    + '</w:body></w:document>'
+  return buildZipBuffer([
+    { name: '[Content_Types].xml', data: Buffer.from(CONTENT_TYPES_XML, 'utf8'), method: ZIP_METHOD_STORED },
+    { name: 'word/document.xml', data: Buffer.from(documentXml, 'utf8') },
+  ])
+}
+
+/** I-8 回归：`xl/workbook.xml` 伪装为 0 字节的 25 MB 炸弹，必须 fail-closed 返回 `zip-limit-exceeded`。 */
+export function buildWorkbookBombXlsx(): Buffer {
+  return buildZipBuffer([
+    { name: '[Content_Types].xml', data: Buffer.from(CONTENT_TYPES_XML, 'utf8'), method: ZIP_METHOD_STORED },
+    { name: 'xl/workbook.xml', data: Buffer.alloc(25 * 1024 * 1024, 0x41), method: ZIP_METHOD_DEFLATED, declaredSize: 0 },
+    { name: 'xl/worksheets/sheet1.xml', data: Buffer.from('<worksheet><sheetData/></worksheet>', 'utf8') },
+  ])
+}
+
+/** I-8 回归：合法 ZIP64 归档（EOCD 条目数 0xFFFF，ZIP64 EOCD 真实条目数为 2）。 */
+export function buildValidZip64Docx(text: string): Buffer {
+  const baseZip = buildMinimalDocx(text)
+  // 拆出原 EOCD（末尾 22 字节）并在中央目录后追加 ZIP64 EOCD（56B）+ ZIP64 Locator（20B）+ 修改后的 EOCD（22B）。
+  const bodyWithoutEocd = baseZip.subarray(0, baseZip.byteLength - 22)
+  const origEocd = baseZip.subarray(baseZip.byteLength - 22)
+  const cdSize = origEocd.readUInt32LE(12)
+  const cdOffset = origEocd.readUInt32LE(16)
+  const entryCount = origEocd.readUInt16LE(10)
+
+  const zip64EocdOffset = bodyWithoutEocd.byteLength
+  const zip64Eocd = Buffer.alloc(56)
+  zip64Eocd.writeUInt32LE(0x06064b50, 0)
+  zip64Eocd.writeBigUInt64LE(44n, 4)
+  zip64Eocd.writeUInt16LE(45, 12)
+  zip64Eocd.writeUInt16LE(45, 14)
+  zip64Eocd.writeUInt32LE(0, 16)
+  zip64Eocd.writeUInt32LE(0, 20)
+  zip64Eocd.writeBigUInt64LE(BigInt(entryCount), 24)
+  zip64Eocd.writeBigUInt64LE(BigInt(entryCount), 32)
+  zip64Eocd.writeBigUInt64LE(BigInt(cdSize), 40)
+  zip64Eocd.writeBigUInt64LE(BigInt(cdOffset), 48)
+
+  const zip64Locator = Buffer.alloc(20)
+  zip64Locator.writeUInt32LE(0x07064b50, 0)
+  zip64Locator.writeUInt32LE(0, 4)
+  zip64Locator.writeBigUInt64LE(BigInt(zip64EocdOffset), 8)
+  zip64Locator.writeUInt32LE(1, 16)
+
+  const eocd64 = Buffer.from(origEocd)
+  eocd64.writeUInt16LE(0xffff, 8)
+  eocd64.writeUInt16LE(0xffff, 10)
+  return Buffer.concat([bodyWithoutEocd, zip64Eocd, zip64Locator, eocd64])
+}
+
+/** I-8 回归：带标准 `/Encrypt` 字典的最小密码保护 PDF（触发 pdfjs `PasswordException`）。 */
+export function buildPasswordProtectedPdf(): Buffer {
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n',
+    '3 0 obj\n<< /Filter /Standard /V 1 /R 2 /O <0000000000000000000000000000000000000000000000000000000000000000> /U <0000000000000000000000000000000000000000000000000000000000000000> /P -4 >>\nendobj\n',
+  ]
+  const header = '%PDF-1.4\n'
+  let body = header
+  const offsets: number[] = [0]
+  for (const obj of objects) {
+    offsets.push(Buffer.byteLength(body, 'latin1'))
+    body += obj
+  }
+  const xrefPos = Buffer.byteLength(body, 'latin1')
+  let xref = `xref\n0 ${String(objects.length + 1)}\n0000000000 65535 f \n`
+  for (let i = 1; i < offsets.length; i += 1) {
+    xref += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`
+  }
+  const trailer = `trailer\n<< /Size ${String(objects.length + 1)} /Root 1 0 R /Encrypt 3 0 R /ID [<0123456789abcdef> <0123456789abcdef>] >>\nstartxref\n${String(xrefPos)}\n%%EOF\n`
+  return Buffer.from(body + xref + trailer, 'latin1')
+}

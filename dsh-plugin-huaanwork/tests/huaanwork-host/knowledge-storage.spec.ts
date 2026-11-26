@@ -1,12 +1,15 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { pathToFileURL } from 'node:url'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
+  abortRebuildStaging,
   beginRebuildStaging,
   commitRebuildStaging,
   deleteDocument,
   getChunkWithWindow,
+  getDocChunks,
   getPendingOrganizeBatch,
   getStats,
   listDocs,
@@ -14,6 +17,7 @@ import {
   openCommittedKnowledgeDb,
   openKnowledgeDb,
   recordOrganizeFailure,
+  recoverKnowledgeDbDir,
   renameDocument,
   retryPendingWikiReset,
   searchFts,
@@ -21,6 +25,13 @@ import {
 } from '../../src/huaanwork-host/knowledge/storage-db.ts'
 import { createKnowledgeStorageClient } from '../../src/huaanwork-host/knowledge/storage-client.ts'
 import { tokenizeForFts } from '../../src/huaanwork-host/knowledge/tokenizer.ts'
+
+const storageTempDirs: string[] = []
+function makeStorageTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  storageTempDirs.push(dir)
+  return dir
+}
 
 function sampleChunk(ordinal: number, content: string) {
   return {
@@ -34,6 +45,9 @@ function sampleChunk(ordinal: number, content: string) {
 }
 
 describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', () => {
+  afterEach(() => {
+    for (const dir of storageTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
   it('preserves UUID doc_id across reindex & rename, avoids FTS5 zombie rows, supports non-unique norm_path, and enforces chunk cap', () => {
     const kbDir = mkdtempSync(join(tmpdir(), 'kb-db-'))
     const opened = openKnowledgeDb(kbDir)
@@ -620,6 +634,235 @@ describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', (
       expect(existsSync(join(kbDir, 'wiki.stale'))).toBe(false)
     } finally {
       rmSync(kbDir, { recursive: true, force: true })
+    }
+  })
+
+  it('restores .bak on retry beginRebuildStaging & protects .rebuild in abortRebuildStaging after double rollback failure (C-2), and preserves WAL-before-main recovery (C-2)', () => {
+    // 1. C-2 Part A：双失败后 abortRebuildStaging 不删 .rebuild，且重试 beginRebuildStaging 先还原 .bak 再继承 doc_id。
+    const kbDir = makeStorageTempDir('kb-c2-retry-')
+    const opened = openKnowledgeDb(kbDir)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const original = upsertDocumentWithChunks(opened.db, {
+      relPath: 'history.md', normPath: 'history.md', sha256: 'sha-hist', size: 10, mtimeMs: 1,
+      format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+      chunks: [sampleChunk(0, '历史珍贵数据')],
+    })
+    opened.db.close()
+
+    const failedStaging = beginRebuildStaging(kbDir)
+    failedStaging.upsert({
+      relPath: 'history.md', normPath: 'history.md', sha256: 'sha-hist', size: 10, mtimeMs: 2,
+      format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+      chunks: [sampleChunk(0, '历史珍贵数据')],
+    })
+    expect(commitRebuildStaging(kbDir, failedStaging, {
+      failBeforeCommitPointForTest: () => { throw new Error('step2-ebusy') },
+      failRestoreOldIndexForTest: () => { throw new Error('restore-ebusy') },
+    })).toMatchObject({ ok: false, code: 'rebuild-failed' })
+    // 未活跃的 staging 调用 abortRebuildStaging 绝不能删掉 .rebuild 恢复标志。
+    abortRebuildStaging(kbDir, failedStaging)
+    expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(true)
+    expect(existsSync(join(kbDir, 'index.sqlite.bak'))).toBe(true)
+
+    // 重试 beginRebuildStaging 自动先还原 .bak 并继承原有 docId（不会变成空快照！）。
+    const retryStaging = beginRebuildStaging(kbDir)
+    expect(retryStaging.corruptRecovery).toBe(false)
+    const retried = retryStaging.upsert({
+      relPath: 'history.md', normPath: 'history.md', sha256: 'sha-hist', size: 10, mtimeMs: 3,
+      format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+      chunks: [sampleChunk(0, '历史珍贵数据')],
+    })
+    expect(retried.docId).toBe(original.docId)
+    expect(commitRebuildStaging(kbDir, retryStaging)).toMatchObject({ ok: true, corruptRecovery: false })
+
+    // 2. C-2 Part B：半还原态（主库已搬回、主库无 WAL 但 .bak-wal 留存未 checkpoint 行）经 recoverKnowledgeDbDir 完整找回 WAL。
+    const walDir = makeStorageTempDir('kb-c2-wal-half-')
+    const initWal = openKnowledgeDb(walDir)
+    expect(initWal.ok).toBe(true)
+    if (initWal.ok) {
+      initWal.db.exec('PRAGMA wal_autocheckpoint = 0')
+      upsertDocumentWithChunks(initWal.db, {
+        relPath: 'wal-doc.md', normPath: 'wal-doc.md', sha256: 'sha-wal', size: 10, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '未落盘增量 WAL 数据')],
+      })
+      const mainBytes = readFileSync(join(walDir, 'index.sqlite'))
+      const walBytes = readFileSync(join(walDir, 'index.sqlite-wal'))
+      initWal.db.close()
+      rmSync(join(walDir, 'index.sqlite-wal'), { force: true })
+      rmSync(join(walDir, 'index.sqlite-shm'), { force: true })
+      writeFileSync(join(walDir, 'index.sqlite'), mainBytes)
+      writeFileSync(join(walDir, 'index.sqlite.bak-wal'), walBytes)
+      writeFileSync(join(walDir, 'index.sqlite.rebuild'), 'aborted')
+    }
+    recoverKnowledgeDbDir(walDir)
+    const afterWal = openKnowledgeDb(walDir)
+    expect(afterWal.ok).toBe(true)
+    if (afterWal.ok) {
+      expect(searchFts(afterWal.db, { kbId: 'k', kbName: 'K', query: '增量' })).toHaveLength(1)
+      afterWal.db.close()
+    }
+  })
+
+  it('preserves committed wiki-reset.pending across later uncommitted rebuild crash (I-3), guards negative/NaN chunk inputs (I-6), aligns FTS rowid & supports relaxed Chinese search (I-7), and checks extractConfigHash + UTF-8 organize budget (M-3)', () => {
+    // I-3：已过提交点的 committed wiki-reset.pending 不被后续未提交重建崩溃清掉。
+    const i3Dir = makeStorageTempDir('kb-i3-pending-')
+    mkdirSync(join(i3Dir, 'wiki'), { recursive: true })
+    writeFileSync(join(i3Dir, 'wiki', 'STALE.md'), '# must reset')
+    writeFileSync(join(i3Dir, 'index.sqlite'), 'NOT_SQLITE')
+    const corruptStaging = beginRebuildStaging(i3Dir)
+    corruptStaging.upsert({
+      relPath: 'fresh.md', normPath: 'fresh.md', sha256: 'sha-f', size: 5, mtimeMs: 1,
+      format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+      chunks: [sampleChunk(0, '重建后新库')],
+    })
+    const committed = commitRebuildStaging(i3Dir, corruptStaging, {
+      failWikiResetOnceForTest: () => { throw new Error('ebusy') },
+    })
+    expect(committed).toEqual({ ok: true, corruptRecovery: true, wikiResetPending: true })
+    // 模拟下一次重建在提交前崩溃留下 index.sqlite.rebuild。
+    writeFileSync(join(i3Dir, 'index.sqlite.rebuild'), 'uncommitted')
+    const recovered = openKnowledgeDb(i3Dir)
+    expect(recovered.ok).toBe(true)
+    if (recovered.ok) {
+      expect(existsSync(join(i3Dir, 'wiki-reset.pending'))).toBe(false)
+      expect(existsSync(join(i3Dir, 'wiki', 'STALE.md'))).toBe(false)
+      recovered.db.close()
+    }
+
+    // I-6 + I-7 + M-3：单库综合回归。
+    const dbDir = makeStorageTempDir('kb-i6-i7-m3-')
+    const opened = openKnowledgeDb(dbDir)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const { db } = opened
+    try {
+      const doc = upsertDocumentWithChunks(db, {
+        relPath: 'fund.md', normPath: 'fund.md', sha256: 'sha-fund', size: 40, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'cfg-v1', status: 'indexed',
+        chunks: [
+          sampleChunk(0, '该基金的赎回税率为1.5%，持有满两年免收'),
+          sampleChunk(1, '片段一'),
+          sampleChunk(2, '片段二'),
+          sampleChunk(3, '片段三'),
+          sampleChunk(4, '片段四'),
+          sampleChunk(5, '片段五'),
+          sampleChunk(6, '片段六'),
+        ],
+      })
+      // I-7：rowid 对齐 + 无空格中文查询「基金税率」降级命中。
+      const misaligned = db.prepare(
+        'SELECT COUNT(*) AS cnt FROM chunks c JOIN chunks_fts f ON f.chunk_id = c.chunk_id WHERE c.rowid <> f.rowid',
+      ).get() as { cnt: number }
+      expect(misaligned.cnt).toBe(0)
+      expect(searchFts(db, { kbId: 'k', kbName: 'K', query: '基金税率' })).toHaveLength(1)
+      expect(searchFts(db, { kbId: 'k', kbName: 'K', query: '不存在的词' })).toHaveLength(0)
+
+      // I-6：负值与 NaN ordinal 返回 chunk-missing，window 钳制在 5 以内。
+      expect(getChunkWithWindow(db, { docId: doc.docId, ordinal: -1, window: 3 }).status).toBe('chunk-missing')
+      expect(getChunkWithWindow(db, { docId: doc.docId, ordinal: Number.NaN, window: 3 }).status).toBe('chunk-missing')
+      const clampedWindow = getChunkWithWindow(db, { docId: doc.docId, ordinal: 3, window: 99 })
+      expect(clampedWindow.status).toBe('ok')
+      if (clampedWindow.status === 'ok') expect(clampedWindow.chunks.length).toBeLessThanOrEqual(5)
+      expect(getDocChunks(db, doc.docId, Number.NaN, Number.NaN).length).toBe(7)
+      expect(listDocs(db, { offset: Number.NaN }).docs).toHaveLength(1)
+
+      // M-3：extractConfigHash 变化时即使 sha256 相同也重置 organized_sha256。
+      markOrganizedAtomic(db, { docId: doc.docId, sha256: 'sha-fund', wikiNotePath: `docs/${doc.docId}.md` })
+      upsertDocumentWithChunks(db, {
+        relPath: 'fund.md', normPath: 'fund.md', sha256: 'sha-fund', size: 40, mtimeMs: 2,
+        format: 'md', extractMode: 'mixed', extractConfigHash: 'cfg-v2', status: 'indexed',
+        chunks: [sampleChunk(0, '该基金的赎回税率为1.5%')],
+      })
+      expect(listDocs(db, { organizeState: 'pending' }).docs.some(d => d.docId === doc.docId)).toBe(true)
+
+      // M-3：getPendingOrganizeBatch 按 UTF-8 字节数（中文 3 字节/字）而非 charCount 控预算。
+      const cnDir = makeStorageTempDir('kb-m3-utf8-budget-')
+      const cnOpened = openKnowledgeDb(cnDir)
+      expect(cnOpened.ok).toBe(true)
+      if (cnOpened.ok) {
+        try {
+          // 每份文档 20 个汉字 = 60 UTF-8 字节（charCount = 20）；maxBytes = 100 时只应放行 1 份（60 + 60 = 120 > 100）。
+          upsertDocumentWithChunks(cnOpened.db, {
+            relPath: 'cn-1.md', normPath: 'cn-1.md', sha256: 's1', size: 60, mtimeMs: 1,
+            format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+            chunks: [sampleChunk(0, '中'.repeat(20))],
+          })
+          upsertDocumentWithChunks(cnOpened.db, {
+            relPath: 'cn-2.md', normPath: 'cn-2.md', sha256: 's2', size: 60, mtimeMs: 2,
+            format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+            chunks: [sampleChunk(0, '文'.repeat(20))],
+          })
+          const batch = getPendingOrganizeBatch(cnOpened.db, { nowMs: Date.now(), maxBytes: 100 })
+          expect(batch.docs).toHaveLength(1)
+        } finally {
+          cnOpened.db.close()
+        }
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  it('cleans active rebuild staging on closeKb/shutdown, memoizes concurrent dispose(), and auto-reopens KBs after Worker crash without cross-killing new requests (I-4)', async () => {
+    // 1. closeKb 与 shutdown 在活跃重建期间关闭并清理 .rebuild* 句柄，且并发 dispose() 共享同一退场 Promise。
+    const kbDir = makeStorageTempDir('kb-i4-rebuild-close-')
+    const client = createKnowledgeStorageClient()
+    expect((await client.openKb('kb-a', kbDir)).ok).toBe(true)
+    await client.beginRebuild('kb-a', kbDir)
+    expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(true)
+    await client.closeKb('kb-a')
+    expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(false)
+    const [d1, d2] = await Promise.all([client.dispose(900), client.dispose(900)])
+    expect(d1).toBeUndefined()
+    expect(d2).toBeUndefined()
+
+    // 2. Worker 崩溃后拉起新实例：自动重开已打开库，且旧 Worker 延迟退出不会误杀新 Worker 在途请求。
+    const crashDir = makeStorageTempDir('kb-i4-crash-respawn-')
+    const stubWorkerPath = join(crashDir, 'flaky-storage-worker.mjs')
+    writeFileSync(
+      stubWorkerPath,
+      [
+        "import { parentPort } from 'node:worker_threads'",
+        'const opened = new Map()',
+        'let sawCrashTrigger = false',
+        "parentPort.on('message', (msg) => {",
+        "  if (msg.op === 'openKb') {",
+        '    opened.set(msg.kbId, msg.kbDir)',
+        '    parentPort.postMessage({ id: msg.id, ok: true, result: { ok: true, wikiResetPending: false } })',
+        '    return',
+        '  }',
+        "  if (msg.op === 'listDocs') {",
+        "    if (msg.kbId === 'kb-trigger-crash' && !sawCrashTrigger) {",
+        '      sawCrashTrigger = true',
+        '      process.exit(1)',
+        '    }',
+        '    if (!opened.has(msg.kbId)) {',
+        "      parentPort.postMessage({ id: msg.id, ok: false, code: 'index-error', error: `${msg.kbId} is not open` })",
+        '      return',
+        '    }',
+        '    parentPort.postMessage({ id: msg.id, ok: true, result: { total: 0, docs: [] } })',
+        '    return',
+        '  }',
+        "  if (msg.op === 'shutdown') {",
+        '    parentPort.postMessage({ id: msg.id, ok: true, result: undefined })',
+        '    setImmediate(() => process.exit(0))',
+        '    return',
+        '  }',
+        '  parentPort.postMessage({ id: msg.id, ok: true, result: undefined })',
+        '})',
+      ].join('\n'),
+    )
+    const flaky = createKnowledgeStorageClient({ workerUrl: pathToFileURL(stubWorkerPath) })
+    try {
+      expect((await flaky.openKb('kb-idle', crashDir)).ok).toBe(true)
+      expect((await flaky.openKb('kb-trigger-crash', crashDir)).ok).toBe(true)
+      await expect(flaky.listDocs('kb-trigger-crash')).rejects.toThrow(/exited/u)
+      // 新 Worker 自动重开先前已打开的 kb-idle，不再永久报 `is not open`！
+      await expect(flaky.listDocs('kb-idle')).resolves.toEqual({ total: 0, docs: [] })
+    } finally {
+      await flaky.dispose(900)
     }
   })
 })

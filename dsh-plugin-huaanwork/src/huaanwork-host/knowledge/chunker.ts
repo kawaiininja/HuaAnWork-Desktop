@@ -52,18 +52,33 @@ export interface ChunkExtractedDocumentResult {
   readonly truncated: boolean
 }
 
-/** 不劈裂 UTF-16 代理对：若切点前是高位代理，则回退一个 code unit。 */
-function safeChunkEnd(text: string, end: number): number {
+/** 不劈裂 UTF-16 代理对：若切点前是高位代理，则回退（退到 start 及之前则前移）。 */
+function safeChunkEnd(text: string, end: number, start: number = 0): number {
   if (end <= 0 || end >= text.length) return end
   const code = text.charCodeAt(end - 1)
-  return code >= 0xd800 && code <= 0xdbff ? end - 1 : end
+  if (code >= 0xd800 && code <= 0xdbff) {
+    return end - 1 > start ? end - 1 : Math.min(text.length, end + 1)
+  }
+  return end
+}
+
+/** 不从 UTF-16 低代理码元开启下一片重叠，避免产生孤立低代理 / U+FFFD（I-11）。 */
+function safeChunkStart(text: string, candidate: number, prevStart: number): number {
+  let start = Math.max(prevStart + 1, candidate)
+  if (start < text.length) {
+    const code = text.charCodeAt(start)
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      start = start - 1 > prevStart ? start - 1 : start + 1
+    }
+  }
+  return start
 }
 
 /** 在 `[minEnd, hardEnd]` 之间回扫最近的自然断点，返回切片结束位置。 */
-function findBreakEnd(text: string, minEnd: number, hardEnd: number): number {
+function findBreakEnd(text: string, minEnd: number, hardEnd: number, start: number): number {
   for (let index = hardEnd - 1; index >= minEnd; index -= 1) {
     const char = text[index]
-    if (char !== undefined && BREAK_CHARS.has(char)) return safeChunkEnd(text, index + 1)
+    if (char !== undefined && BREAK_CHARS.has(char)) return safeChunkEnd(text, index + 1, start)
   }
   return -1
 }
@@ -80,13 +95,13 @@ function* iterateSectionPieces(text: string): Generator<string> {
     let end = hardEnd
     if (hardEnd < text.length) {
       const minEnd = Math.min(start + CHUNK_MIN_CHARS, hardEnd)
-      const breakEnd = findBreakEnd(text, minEnd, hardEnd)
-      end = breakEnd > minEnd ? breakEnd : safeChunkEnd(text, hardEnd)
+      const breakEnd = findBreakEnd(text, minEnd, hardEnd, start)
+      end = breakEnd > minEnd ? breakEnd : safeChunkEnd(text, hardEnd, start)
     }
     const piece = text.slice(start, end)
     if (piece.trim() !== '') yield piece
     if (end >= text.length) break
-    start = Math.max(start + 1, end - CHUNK_OVERLAP_CHARS)
+    start = safeChunkStart(text, end - CHUNK_OVERLAP_CHARS, start)
   }
 }
 
@@ -124,8 +139,12 @@ export function chunkExtractedDocument(
   doc: ExtractedDocument,
   opts: ChunkExtractedDocumentOptions = {},
 ): ChunkExtractedDocumentResult {
-  const maxChunks = Math.max(1, opts.maxChunks ?? MAX_CHUNKS_PER_DOC)
-  const maxTextBytes = Math.max(0, opts.maxTextBytes ?? MAX_DOC_TEXT_BYTES)
+  const maxChunks = opts.maxChunks !== undefined && Number.isFinite(opts.maxChunks)
+    ? Math.max(1, Math.floor(opts.maxChunks))
+    : MAX_CHUNKS_PER_DOC
+  const maxTextBytes = opts.maxTextBytes !== undefined && Number.isFinite(opts.maxTextBytes)
+    ? Math.max(0, Math.floor(opts.maxTextBytes))
+    : MAX_DOC_TEXT_BYTES
   const chunks: ChunkDraft[] = []
   let producedBytes = 0
   let truncated = false
@@ -133,24 +152,29 @@ export function chunkExtractedDocument(
 
   outer: for (const section of doc.sections) {
     if (section.text.trim() === '') continue
-    const header = section.locator.kind === 'sheet'
+    const rawHeaderRow = (section.locator.kind === 'sheet' || section.locator.kind === 'line')
       && section.headerRow !== undefined
       && section.headerRow !== ''
-      ? `${section.headerRow}\n`
+      ? section.headerRow
       : ''
-    const headerBytes = Buffer.byteLength(header, 'utf8')
     for (const piece of iterateSectionPieces(section.text)) {
       if (piece.trim() === '') continue
       if (chunks.length >= maxChunks) {
         truncated = true
         break outer
       }
+      // 已以表头行开头的首片不再重复预置表头（M-5）；后续分片补齐表头上下文。
+      const needsHeader = rawHeaderRow !== ''
+        && piece !== rawHeaderRow
+        && !piece.startsWith(`${rawHeaderRow}\n`)
+      const header = needsHeader ? `${rawHeaderRow}\n` : ''
+      const headerBytes = header === '' ? 0 : Buffer.byteLength(header, 'utf8')
       let body = piece
       if (producedBytes + headerBytes + Buffer.byteLength(body, 'utf8') > maxTextBytes) {
         body = truncateToUtf8Bytes(piece, maxTextBytes - producedBytes - headerBytes)
         truncated = true
       }
-      if (body === '') break outer
+      if (body.trim() === '') break outer
       const content = header + body
       chunks.push(buildChunk(ordinal, section, content))
       ordinal += 1

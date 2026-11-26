@@ -11,20 +11,32 @@
 
 import { randomBytes } from 'node:crypto'
 import { readFile, rename } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { assertSafePathSegment } from '../workspace-state.ts'
+import { foldAsciiPath, isUncOrDevicePath } from './paths.ts'
 import type { KnowledgeBaseRecord } from './types.ts'
 
 const REGISTRY_FILENAME = 'knowledge-bases.json'
 const REGISTRY_FILE_MODE = 0o600
 
-/** 按注册表文件路径串行化写入（同 profileDir 的并发写排队，跨 profile 互不阻塞）。 */
+/** 按规范化注册表文件路径串行化写与损坏隔离（同 profileDir 排队，跨 profile 互不阻塞）。 */
 const writeQueues = new Map<string, Promise<void>>()
 
 function registryPath(profileDir: string): string {
   return join(profileDir, REGISTRY_FILENAME)
+}
+
+function registryQueueKey(profileDir: string): string {
+  const full = resolve(registryPath(profileDir))
+  return process.platform === 'win32' ? foldAsciiPath(full) : full
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
 }
 
 function parseRecord(raw: unknown): KnowledgeBaseRecord | null {
@@ -32,7 +44,7 @@ function parseRecord(raw: unknown): KnowledgeBaseRecord | null {
   const rec = raw as Record<string, unknown>
   if (typeof rec.id !== 'string') return null
   if (typeof rec.name !== 'string' || rec.name.trim() === '') return null
-  if (typeof rec.sourceDir !== 'string' || rec.sourceDir === '') return null
+  if (typeof rec.sourceDir !== 'string' || rec.sourceDir.trim() === '' || isUncOrDevicePath(rec.sourceDir)) return null
   if (typeof rec.autoOrganize !== 'boolean') return null
   if (typeof rec.watchPaused !== 'boolean') return null
   if (typeof rec.createdAt !== 'string' || rec.createdAt === '') return null
@@ -52,87 +64,117 @@ function parseRecord(raw: unknown): KnowledgeBaseRecord | null {
   }
 }
 
-/**
- * 将无法按顶层形状解析的注册表原文件隔离为
- * `knowledge-bases.json.corrupt-<UTC 时间戳>-<随机后缀>`。`rename` 保留原文件权限
- * （0o600），供人工恢复；隔离失败必须显式抛出（fail-closed），绝不假装为空启动，
- * 避免后续写入把尚未隔离的损坏注册表直接覆盖。
- */
-async function quarantineCorruptRegistry(profileDir: string): Promise<void> {
-  const source = registryPath(profileDir)
-  const stamp = new Date().toISOString().replace(/[:.]/gu, '-')
-  const suffix = randomBytes(4).toString('hex')
-  const target = `${source}.corrupt-${stamp}-${suffix}`
+function parseRegistryContent(content: string): { readonly ok: true; readonly records: KnowledgeBaseRecord[] } | { readonly ok: false } {
+  let parsed: unknown
   try {
-    await rename(source, target)
-    console.warn(`[knowledge] quarantined corrupt knowledge-bases.json: ${source} -> ${target}`)
-  } catch (error) {
-    console.warn(
-      `[knowledge] failed to quarantine corrupt knowledge-bases.json ${source}: `
-      + `${error instanceof Error ? error.message : String(error)}`,
-    )
-    throw error
+    parsed = JSON.parse(content)
+  } catch {
+    return { ok: false }
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false }
+  }
+  const rawList = (parsed as { knowledgeBases?: unknown }).knowledgeBases
+  if (!Array.isArray(rawList)) {
+    return { ok: false }
+  }
+  const records: KnowledgeBaseRecord[] = []
+  const seenIds = new Set<string>()
+  for (const raw of rawList) {
+    const record = parseRecord(raw)
+    if (record === null) {
+      const id = typeof (raw as { id?: unknown } | null)?.id === 'string'
+        ? (raw as { id: string }).id
+        : '<unknown>'
+      console.warn(`[knowledge] dropped invalid knowledge base record ${id} from knowledge-bases.json`)
+      continue
+    }
+    if (seenIds.has(record.id)) {
+      console.warn(`[knowledge] dropped duplicate knowledge base record ${record.id} from knowledge-bases.json`)
+      continue
+    }
+    seenIds.add(record.id)
+    records.push(record)
+  }
+  return { ok: true, records }
+}
+
+function enqueueRegistryMutation<T>(profileDir: string, task: () => Promise<T>): Promise<T> {
+  const key = registryQueueKey(profileDir)
+  const previous = writeQueues.get(key) ?? Promise.resolve()
+  const next = previous
+    .catch(() => undefined)
+    .then(task)
+  const tracked = next.then(() => undefined, () => undefined)
+  writeQueues.set(key, tracked)
+  return next.finally(() => {
+    if (writeQueues.get(key) === tracked) writeQueues.delete(key)
+  })
 }
 
 /**
- * 读取注册表。文件缺失返回 `[]`；顶层 JSON 解析失败或形状不符时隔离原
+ * 在同路径串行队列内隔离无法解析的注册表（I-10）：
+ * 进队列后复读文件，若并发写已将其替换为合法 JSON 则直接返回合法记录、绝不误删；
+ * 若并发读已将其隔离（`ENOENT`）则返回空数组；真实隔离失败仍 fail-closed 抛出。
+ */
+function quarantineCorruptRegistrySerialized(profileDir: string): Promise<KnowledgeBaseRecord[]> {
+  return enqueueRegistryMutation(profileDir, async (): Promise<KnowledgeBaseRecord[]> => {
+    const source = registryPath(profileDir)
+    let latestContent: string
+    try {
+      latestContent = await readFile(source, 'utf8')
+    } catch (error: unknown) {
+      if (errorCode(error) === 'ENOENT') return []
+      throw error
+    }
+    const reparsed = parseRegistryContent(latestContent)
+    if (reparsed.ok) return reparsed.records
+
+    const stamp = new Date().toISOString().replace(/[:.]/gu, '-')
+    const suffix = randomBytes(4).toString('hex')
+    const target = `${source}.corrupt-${stamp}-${suffix}`
+    try {
+      await rename(source, target)
+      console.warn(`[knowledge] quarantined corrupt knowledge-bases.json: ${source} -> ${target}`)
+      return []
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return []
+      console.warn(
+        `[knowledge] failed to quarantine corrupt knowledge-bases.json ${source}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      )
+      throw error
+    }
+  })
+}
+
+/**
+ * 读取注册表。文件缺失返回 `[]`；顶层 JSON 解析失败或形状不符时串行隔离原
  * 文件（`knowledge-bases.json.corrupt-<UTC 时间戳>`）后返回 `[]`；逐条字段
- * 校验，畸形记录被丢弃并逐条告警（读取不产生任何注册表写副作用）。
+ * 校验并按 `id` 去重，畸形记录被丢弃并逐条告警。
  */
 export async function readKnowledgeBases(profileDir: string): Promise<KnowledgeBaseRecord[]> {
   let content: string
   try {
     content = await readFile(registryPath(profileDir), 'utf8')
   } catch (error: unknown) {
-    if ((error as { code?: string }).code === 'ENOENT') return []
+    if (errorCode(error) === 'ENOENT') return []
     throw error
   }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content)
-  } catch {
-    await quarantineCorruptRegistry(profileDir)
-    return []
+  const parsed = parseRegistryContent(content)
+  if (!parsed.ok) {
+    return await quarantineCorruptRegistrySerialized(profileDir)
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    await quarantineCorruptRegistry(profileDir)
-    return []
-  }
-  const rawList = (parsed as { knowledgeBases?: unknown }).knowledgeBases
-  if (!Array.isArray(rawList)) {
-    await quarantineCorruptRegistry(profileDir)
-    return []
-  }
-  const records: KnowledgeBaseRecord[] = []
-  for (const raw of rawList) {
-    const record = parseRecord(raw)
-    if (record !== null) {
-      records.push(record)
-      continue
-    }
-    const id = typeof (raw as { id?: unknown } | null)?.id === 'string'
-      ? (raw as { id: string }).id
-      : '<unknown>'
-    console.warn(`[knowledge] dropped invalid knowledge base record ${id} from knowledge-bases.json`)
-  }
-  return records
+  return parsed.records
 }
 
 /**
- * 原子写入注册表（`writeFileAtomic + 0o600`）。按注册表路径串行排队：
+ * 原子写入注册表（`writeFileAtomic + 0o600`）。按规范化路径串行排队：
  * 后一次写入总是看到前一次完成的落盘结果；序列化内容在入队前快照，
  * 调用方事后修改数组不影响已排队的写入。
  */
 export function writeKnowledgeBases(profileDir: string, records: readonly KnowledgeBaseRecord[]): Promise<void> {
   const filePath = registryPath(profileDir)
   const content = `${JSON.stringify({ knowledgeBases: records }, null, 2)}\n`
-  const previous = writeQueues.get(filePath) ?? Promise.resolve()
-  const next = previous
-    .catch(() => undefined)
-    .then(() => writeFileAtomic(filePath, content, { mode: REGISTRY_FILE_MODE }))
-  writeQueues.set(filePath, next)
-  return next.finally(() => {
-    if (writeQueues.get(filePath) === next) writeQueues.delete(filePath)
-  })
+  return enqueueRegistryMutation(profileDir, () => writeFileAtomic(filePath, content, { mode: REGISTRY_FILE_MODE }))
 }

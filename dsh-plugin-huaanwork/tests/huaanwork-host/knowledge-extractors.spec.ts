@@ -1,12 +1,14 @@
-import { mkdirSync, mkdtempSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
-import { openVerifiedSourceFile, readAndHashHandle, walkSourceDirectory } from '../../src/huaanwork-host/knowledge/safe-read.ts'
+import { hashHandle, openVerifiedSourceFile, readAndHashHandle, walkSourceDirectory } from '../../src/huaanwork-host/knowledge/safe-read.ts'
 import { computeExtractConfigHash, extractFromBuffer, TEXT_EXTENSIONS } from '../../src/huaanwork-host/knowledge/extractors/index.ts'
+import { decodeHtmlEntities } from '../../src/huaanwork-host/knowledge/extractors/text.ts'
 import {
+  buildDocxWithTabsAndBreaks,
   buildEncryptedZipBuffer,
   buildForgedZeroSizeZipBombDocx,
   buildMinimalChineseCidPdf,
@@ -14,11 +16,25 @@ import {
   buildMinimalPptx,
   buildMinimalXlsx,
   buildOverEntryLimitZipDocx,
+  buildPasswordProtectedPdf,
+  buildRichSelfClosingXlsx,
+  buildValidZip64Docx,
+  buildWorkbookBombXlsx,
+  buildZipBuffer,
 } from '../fixtures/knowledge/generators.ts'
 
 const DIR_SYMLINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'
+const extractorTempDirs: string[] = []
+function makeExtractorTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  extractorTempDirs.push(dir)
+  return dir
+}
 
 describe('knowledge safe-read chain and document extractors', () => {
+  afterEach(() => {
+    for (const dir of extractorTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
   it('blocks outside symlinks/junctions, loops, inode replacement, and oversized files; allows in-source links via single FileHandle', async () => {
     const root = mkdtempSync(join(tmpdir(), 'kb-safe-'))
     const sourceDir = join(root, 'src')
@@ -249,5 +265,165 @@ describe('knowledge safe-read chain and document extractors', () => {
     const req = createRequire(import.meta.url)
     expect(() => req('@napi-rs/canvas')).toThrow(/MODULE_NOT_FOUND|disabled/u)
     expect(Object.keys(req.cache).filter(key => key.includes('@napi-rs/canvas'))).toEqual([])
+  })
+
+  it('handles self-closing OOXML tags (C-3), tabs/breaks, ZIP64, workbook bombs, ReDoS, entities, UTF-16 BOM, code fences, and encrypted PDF (I-8 / M-5)', async () => {
+    // C-3 + M-5：自闭合 <c/> / <row/> / <t/>、多 <t> 内联串、单引号属性与 workbook.xml.rels 映射。
+    const richXlsx = await extractFromBuffer({ buffer: buildRichSelfClosingXlsx(), ext: '.xlsx' })
+    expect(richXlsx.status).toBe('indexed')
+    const sheet1Section = richXlsx.sections.find(s => s.headingPath === '附表甲')
+    const sheet2Section = richXlsx.sections.find(s => s.headingPath === '风控总表')
+    expect(sheet1Section).toBeDefined()
+    expect(sheet1Section?.text).toContain('列头甲')
+    expect(sheet1Section?.text).toContain('第一条关键数据')
+    expect(sheet1Section?.text).toContain('合规')
+    expect(sheet1Section?.locator).toEqual({ kind: 'sheet', sheet: '附表甲', rowStart: 1, rowEnd: 5 })
+    expect(sheet2Section?.text).toContain('空后拼接')
+
+    // I-8：DOCX 真实 <w:tab/> / <w:br/> 与字面 &lt;w:br/&gt; 不串扰。
+    const tabDocx = await extractFromBuffer({ buffer: buildDocxWithTabsAndBreaks(), ext: '.docx' })
+    expect(tabDocx.status).toBe('indexed')
+    const tabText = tabDocx.sections.map(s => s.text).join('\n')
+    expect(tabText).toContain('列一\t列二\n字面<w:br/>保持原样')
+
+    // I-8：xl/workbook.xml 炸弹不再被吞掉。
+    const wbBomb = await extractFromBuffer({ buffer: buildWorkbookBombXlsx(), ext: '.xlsx' })
+    expect(wbBomb).toMatchObject({ status: 'skipped', statusReason: 'zip-limit-exceeded' })
+
+    // I-8：合法 ZIP64 归档（EOCD 0xFFFF）正常解析。
+    const zip64Doc = await extractFromBuffer({ buffer: buildValidZip64Docx('ZIP64 正常内容'), ext: '.docx' })
+    expect(zip64Doc.status).toBe('indexed')
+    expect(zip64Doc.sections[0]?.text).toContain('ZIP64 正常内容')
+
+    // I-8：未闭合标签恶意输入保持 O(N) 线性耗时（无 ReDoS 回溯）。
+    const t0 = performance.now()
+    const malformedDocx = buildZipBuffer([
+      { name: 'word/document.xml', data: Buffer.from('<w:p>'.repeat(30_000), 'utf8') },
+    ])
+    const malformedRes = await extractFromBuffer({ buffer: malformedDocx, ext: '.docx' })
+    expect(malformedRes.status).toBe('indexed')
+    const malformedHtml = await extractFromBuffer({
+      buffer: Buffer.from(`${'<!--'.repeat(20_000)}${'<script>'.repeat(20_000)}<p>正文</p>`, 'utf8'),
+      ext: '.html',
+    })
+    expect(malformedHtml.status).toBe('indexed')
+    expect(performance.now() - t0).toBeLessThan(1_000)
+
+    // I-8：HTML 实体解码拒绝原型链属性、畸形十进制与孤立代理。
+    expect(decodeHtmlEntities('&constructor; &toString; &#12abc; &#0; &#xD800; &amp; &#65; &#x4E2D;'))
+      .toBe('&constructor; &toString; &#12abc; &#0; &#xD800; & A 中')
+
+    // I-8 / M-5：UTF-16LE / UTF-16BE BOM 解码与二进制 NUL 检测。
+    const utf16Le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('中文UTF16LE', 'utf16le')])
+    const leDoc = await extractFromBuffer({ buffer: utf16Le, ext: '.txt' })
+    expect(leDoc.status).toBe('indexed')
+    expect(leDoc.sections[0]?.text).toContain('中文UTF16LE')
+    const utf16BePayload = Buffer.from('中文UTF16BE', 'utf16le')
+    for (let i = 0; i + 1 < utf16BePayload.length; i += 2) {
+      const lo = utf16BePayload[i]!
+      utf16BePayload[i] = utf16BePayload[i + 1]!
+      utf16BePayload[i + 1] = lo
+    }
+    const beDoc = await extractFromBuffer({ buffer: Buffer.concat([Buffer.from([0xfe, 0xff]), utf16BePayload]), ext: '.txt' })
+    expect(beDoc.status).toBe('indexed')
+    expect(beDoc.sections[0]?.text).toContain('中文UTF16BE')
+    expect(await extractFromBuffer({ buffer: Buffer.from([0x41, 0x00, 0x42, 0x00]), ext: '.txt' }))
+      .toMatchObject({ status: 'skipped', statusReason: 'binary-content' })
+
+    // M-5：Markdown 代码块内的 # 注释不污染 headingPath；HTML 多行标题折叠为单行。
+    const mdFence = await extractFromBuffer({
+      buffer: Buffer.from('# 真标题\n```bash\n# 代码注释不是标题\necho ok\n```\n正文\n', 'utf8'),
+      ext: '.md',
+    })
+    expect(mdFence.sections.every(s => !s.headingPath.includes('代码注释不是标题'))).toBe(true)
+    const multiLineH1 = await extractFromBuffer({
+      buffer: Buffer.from('<h1>第一行\n第二行</h1><p>内容</p>', 'utf8'),
+      ext: '.html',
+    })
+    expect(multiLineH1.sections.some(s => s.headingPath === '第一行 第二行')).toBe(true)
+
+    // I-8：密码保护 PDF 归类为 skipped: 'encrypted'（与 OOXML 对齐）。
+    const encPdf = await extractFromBuffer({ buffer: buildPasswordProtectedPdf(), ext: '.pdf' })
+    expect(encPdf).toMatchObject({ status: 'skipped', statusReason: 'encrypted' })
+  })
+
+  it('blocks in-source UNC symlinks (C-4), stops subdir loops on hop 1 and realpath-mismatched checkPathSegments (I-5), streams hashHandle (I-8), maps open ELOOP to inode-replaced (M-5), and marks 500-chunk truncation as partial (I-6)', async () => {
+    const root = makeExtractorTempDir('kb-safe-c4-i5-')
+    const src = join(root, 'src')
+    mkdirSync(join(src, 'sub', 'child'), { recursive: true })
+    writeFileSync(join(src, 'sub', 'child', 'doc.txt'), 'hello-stream')
+    symlinkSync(join(src, 'sub'), join(src, 'sub', 'child', 'loop-back'), DIR_SYMLINK_TYPE)
+
+    if (process.platform !== 'win32') {
+      symlinkSync('\\\\evil\\share\\secret.txt', join(src, 'unc-inside.txt'))
+    }
+
+    // I-5：非根子目录环 sub/child/loop-back -> sub 在首跳即被阻断，不重复产出 doc.txt。
+    const walked = await walkSourceDirectory(src)
+    expect(walked.files.filter(f => f.relPath.endsWith('doc.txt'))).toHaveLength(1)
+    expect(walked.skipped.some(s => s.relPath === 'sub/child/loop-back' && s.reason === 'symlink-loop')).toBe(true)
+    if (process.platform !== 'win32') {
+      expect(walked.skipped.some(s => s.relPath === 'unc-inside.txt' && s.reason === 'symlink-outside-source')).toBe(true)
+      await expect(openVerifiedSourceFile(src, join(src, 'unc-inside.txt')))
+        .resolves.toMatchObject({ ok: false, reason: 'symlink-outside-source' })
+    }
+
+    // I-5：sourceRoot 为词法符号链接而 candidatePath 已是 realpath 时，checkPathSegments 仍有效拦住目录环。
+    const realSrc = realpathSync(src)
+    const lexicalSrcLink = join(root, 'lexical-src')
+    symlinkSync(realSrc, lexicalSrcLink, DIR_SYMLINK_TYPE)
+    await expect(openVerifiedSourceFile(lexicalSrcLink, join(realSrc, 'sub', 'child', 'loop-back', 'child', 'doc.txt')))
+      .resolves.toMatchObject({ ok: false, reason: 'symlink-loop' })
+
+    // I-8：hashHandle 与 readAndHashHandle 结果一致。
+    const docFile = join(src, 'sub', 'child', 'doc.txt')
+    const h1 = await openVerifiedSourceFile(src, docFile)
+    const h2 = await openVerifiedSourceFile(src, docFile)
+    expect(h1.ok && h2.ok).toBe(true)
+    if (h1.ok && h2.ok) {
+      try {
+        const full = await readAndHashHandle(h1.handle)
+        const streamed = await hashHandle(h2.handle)
+        expect(full.ok && streamed.ok).toBe(true)
+        if (full.ok && streamed.ok) expect(streamed.sha256).toBe(full.sha256)
+      } finally {
+        await h1.handle.close()
+        await h2.handle.close()
+      }
+    }
+
+    // M-5：beforeOpenHook 将普通文件替换为符号链接时，POSIX open(O_NOFOLLOW) 的 ELOOP 映射为 inode-replaced。
+    if (process.platform !== 'win32') {
+      const swapFile = join(src, 'toctou-link.txt')
+      writeFileSync(swapFile, 'original')
+      const res = await openVerifiedSourceFile(src, swapFile, {
+        beforeOpenHook: () => {
+          unlinkSync(swapFile)
+          symlinkSync(docFile, swapFile)
+        },
+      })
+      expect(res).toMatchObject({ ok: false, reason: 'inode-replaced' })
+    }
+
+    // I-6：超过 500 切片但未超 10 MB 文本上限的大文件必须提升为 status: 'partial', statusReason: 'text-truncated'。
+    const hugeMd = join(src, 'over-500-chunks.md')
+    writeFileSync(hugeMd, Array.from({ length: 520 }, (_, i) => `# 章节 ${String(i)}\n段落内容 ${'甲'.repeat(20)}`).join('\n'))
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    try {
+      const extracted = await pool.extractFile('kb-500', {
+        sourceRoot: src,
+        filePath: hugeMd,
+        relPath: 'over-500-chunks.md',
+      })
+      expect(extracted.ok).toBe(true)
+      if (extracted.ok && extracted.hashOnly !== true) {
+        expect(extracted.truncated).toBe(true)
+        expect(extracted.chunks).toHaveLength(500)
+        expect(extracted.doc.status).toBe('partial')
+        expect(extracted.doc.statusReason).toBe('text-truncated')
+      }
+    } finally {
+      await pool.dispose()
+    }
   })
 })

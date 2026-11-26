@@ -14,8 +14,9 @@
  * TypeScript 语法；纯类型导入必须写 `import type`，相对导入保留 `.ts` 后缀。
  */
 
+import { R_OK } from 'node:constants'
 import { randomUUID } from 'node:crypto'
-import { mkdir, rm, stat } from 'node:fs/promises'
+import { access, mkdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { readKnowledgeEvents } from './events.ts'
@@ -154,19 +155,19 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   const statsCache = new Map<string, KnowledgeBaseStats>()
   const deletingIds = new Set<string>()
   const maintainingIds = new Set<string>()
-  const resumeListeners = new Set<() => void>()
 
   let organizerHooks: KnowledgeOrganizerHooks | undefined
   let removalHook: ((kbId: string) => Promise<void>) | undefined
   let disposed = false
+  let registryLoadedPromise: Promise<void> | undefined
   let startPromise: Promise<void> | undefined
   let disposePromise: Promise<void> | undefined
   /** `records` 变更代际号：用于 `update()` 前置无锁校验后的并发变更检测（M-9）。 */
   let recordsVersion = 0
   /** 注册表写入串行化：任务执行时才快照 `records`，后一次写总带上前一次的内存变更。 */
   let registryChain: Promise<unknown> = Promise.resolve()
-  /** create 串行化：限制检查与注册表写入不被并发 create 绕过/覆盖。 */
-  let createChain: Promise<unknown> = Promise.resolve()
+  /** 源目录绑定与创建共享串行链：彻底杜绝并发 `create` 与 `update(sourceDir)` 互相越过父子重叠校验（I-5）。 */
+  let bindingChain: Promise<unknown> = Promise.resolve()
 
   const engine: KnowledgeSyncEngine = createKnowledgeSyncEngine({
     profileDir,
@@ -187,6 +188,22 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       ? {}
       : { failWikiResetOnceForTest: opts.failWikiResetOnceForTest }),
   })
+
+  function assertNotDisposed(): void {
+    if (disposed) {
+      throw new KnowledgeSyncError('knowledge-base-busy', 'knowledge host is disposed')
+    }
+  }
+
+  function serializeBinding<T>(task: () => Promise<T>): Promise<T> {
+    const run = bindingChain.then(task, task)
+    bindingChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  async function waitRegistryLoaded(): Promise<void> {
+    if (registryLoadedPromise !== undefined) await registryLoadedPromise
+  }
 
   function requireRecord(kbId: string): KnowledgeBaseRecord {
     const record = records.get(kbId)
@@ -241,11 +258,13 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     }
   }
 
-  /** 源目录是否已不可访问（缺失/非目录/无权限）：`stat` 一次，绝不读内容。 */
+  /** 源目录是否已不可访问（缺失/非目录/无读权限）：`stat` + `access(R_OK)`，绝不读内容（I-9）。 */
   async function sourceUnavailableFor(record: KnowledgeBaseRecord): Promise<boolean> {
     try {
       const info = await stat(record.sourceDir)
-      return !info.isDirectory()
+      if (!info.isDirectory()) return true
+      await access(record.sourceDir, R_OK)
+      return false
     } catch {
       return true
     }
@@ -274,18 +293,35 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   async function start(): Promise<void> {
     if (startPromise !== undefined) return startPromise
     if (disposed) return
+    let resolveLoaded: () => void = () => undefined
+    registryLoadedPromise = new Promise<void>((resolve) => {
+      resolveLoaded = resolve
+    })
     startPromise = (async (): Promise<void> => {
-      const persisted = await readKnowledgeBases(profileDir)
-      records.clear()
-      for (const record of persisted) {
-        records.set(record.id, record)
-        if (!statsCache.has(record.id)) statsCache.set(record.id, ZERO_STATS)
+      let persisted: KnowledgeBaseRecord[]
+      try {
+        persisted = await readKnowledgeBases(profileDir)
+        if (!disposed) {
+          for (const record of persisted) {
+            if (deletingIds.has(record.id) || records.has(record.id)) continue
+            records.set(record.id, record)
+            if (!statsCache.has(record.id)) statsCache.set(record.id, ZERO_STATS)
+          }
+          recordsVersion += 1
+        }
+      } finally {
+        resolveLoaded()
       }
       // 0 库惰性启动：注册表为空时不触碰 storage / pool，线程数保持 0。
       for (const record of persisted) {
         if (disposed) return
+        // I-1 修复：每轮启动前复核实时状态，跳过并发删库/维护中或已由 API 启动的库。
+        if (deletingIds.has(record.id) || maintainingIds.has(record.id)) continue
+        const live = records.get(record.id)
+        if (live === undefined) continue
+        if (engine.getState(live.id) !== undefined) continue
         try {
-          await engine.startKb(record)
+          await engine.startKb(live)
         } catch {
           // 单个库启动失败（目录不可写/Worker 崩溃）只影响该库；后续库继续启动，
           // 阶段由引擎按 index-error 呈现。
@@ -296,6 +332,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function list(): Promise<readonly KnowledgeBaseSummary[]> {
+    await waitRegistryLoaded()
     const summaries: KnowledgeBaseSummary[] = []
     for (const record of records.values()) {
       if (records.get(record.id) !== record) continue
@@ -312,16 +349,12 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function create(input: { name: string; sourceDir: string; autoOrganize?: boolean }): Promise<KnowledgeBaseRecord> {
-    const run = createChain.then(
-      () => createInner(input),
-      () => createInner(input),
-    )
-    createChain = run.then(() => undefined, () => undefined)
-    return run
+    await waitRegistryLoaded()
+    return serializeBinding(() => createInner(input))
   }
 
   async function createInner(input: { name: string; sourceDir: string; autoOrganize?: boolean }): Promise<KnowledgeBaseRecord> {
-    if (disposed) throw new KnowledgeSyncError('knowledge-base-busy', 'knowledge host is disposed')
+    assertNotDisposed()
     if (typeof input.name !== 'string' || input.name.trim() === '') {
       throw new KnowledgeSyncError('invalid-source-dir', 'knowledge base name must not be empty')
     }
@@ -339,6 +372,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     if (!validation.ok) {
       throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
     }
+    assertNotDisposed()
     const id = randomUUID()
     // I-6：持久化 `validation.realSourceDir`，确保原符号链接删除后嵌套/重叠校验依然成立。
     const record: KnowledgeBaseRecord = {
@@ -358,10 +392,11 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       await persistRegistry()
       await engine.startKb(record)
     } catch (error) {
-      // 注册表与磁盘保持成对：启动失败时回滚记录与刚创建的中立目录。
+      // 注册表与磁盘保持成对：启动失败时先停机释放 runtime/Watcher，再回滚记录与中立目录（I-1）。
       records.delete(id)
       recordsVersion += 1
       statsCache.delete(id)
+      await engine.stopKb(id).catch(() => undefined)
       await persistRegistry().catch(() => undefined)
       await rm(kbRoot, { recursive: true, force: true }).catch(() => undefined)
       throw error
@@ -373,6 +408,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     kbId: string,
     patch: { name?: string; sourceDir?: string; autoOrganize?: boolean; watchPaused?: boolean },
   ): Promise<KnowledgeBaseRecord> {
+    await waitRegistryLoaded()
+    assertNotDisposed()
     const initialRecord = requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
@@ -395,6 +432,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       }
       prevalidatedRealSourceDir = validation.realSourceDir
     }
+    assertNotDisposed()
     const record = requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
@@ -428,42 +466,53 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
           next = { ...next, watchPaused: true }
         }
         // I-6：重绑同样持久化规范化 `realSourceDir`。
-        const rebound: KnowledgeBaseRecord = { ...next, sourceDir: canonicalSourceDir }
-        // 2/3. 引擎取维护门闩 + 停机序列；Host 在收敛前经 registryChain 原子
-        //      落盘并更新内存。落盘失败回滚内存并抛出，引擎用旧记录恢复运行态。
-        //      落盘成功后的收敛失败由引擎吞掉：磁盘与内存都保持新 sourceDir，
-        //      下次启动对账自愈（规格 §6.4 失败与中断恢复）。
+        let rebound: KnowledgeBaseRecord = { ...next, sourceDir: canonicalSourceDir }
+        // 2/3. 引擎取维护门闩 + 停机序列；Host 在共享 bindingChain 内复核重叠后原子
+        //      落盘并更新内存（I-5 杜绝与并发 create/update 的父子重叠竞态）。
         try {
           await engine.rebindSourceDir(kbId, canonicalSourceDir, canonicalSourceDir, async () => {
-            const previous = records.get(kbId)
-            records.set(kbId, rebound)
-            recordsVersion += 1
-            try {
-              await persistRegistry()
-            } catch (error) {
-              if (previous === undefined) records.delete(kbId)
-              else records.set(kbId, previous)
+            await serializeBinding(async () => {
+              assertNotDisposed()
+              const finalCheck = await validateSourceDir({
+                sourceDir: canonicalSourceDir,
+                profileDir,
+                existing: [...records.values()],
+                ignoreKbId: kbId,
+              })
+              if (!finalCheck.ok) {
+                throw new KnowledgeSyncError('invalid-source-dir', finalCheck.reason)
+              }
+              rebound = { ...next, sourceDir: finalCheck.realSourceDir }
+              const previous = records.get(kbId)
+              records.set(kbId, rebound)
               recordsVersion += 1
-              throw error
-            }
+              try {
+                await persistRegistry()
+              } catch (error) {
+                if (previous === undefined) records.delete(kbId)
+                else records.set(kbId, previous)
+                recordsVersion += 1
+                throw error
+              }
+            })
           })
         } catch (error) {
-          if (pausedBeforeRebind) await engine.resumeWatch(kbId).catch(() => undefined)
+          if (pausedBeforeRebind) await engine.resumeWatch(kbId, { awaitReconcile: false }).catch(() => undefined)
           throw error
         }
         next = rebound
         persistedNext = rebound
       }
-      let watchTransition: 'paused' | 'resumed' | undefined
-      if (patch.watchPaused !== undefined && patch.watchPaused !== next.watchPaused) {
-        if (patch.watchPaused) {
-          await engine.pauseWatch(kbId)
-          watchTransition = 'paused'
-        } else {
-          await engine.resumeWatch(kbId)
-          watchTransition = 'resumed'
-        }
-        next = { ...next, watchPaused: patch.watchPaused }
+
+      const wantPause = patch.watchPaused === true && !next.watchPaused
+      const wantResume = patch.watchPaused === false && next.watchPaused
+      if (wantPause) {
+        await engine.pauseWatch(kbId)
+        next = { ...next, watchPaused: true }
+      } else if (wantResume) {
+        // I-9 修复：恢复监听时先原子落盘 `watchPaused: false`，再非阻塞启动后台对账，
+        // 避免全量对账期间长时间占用 `maintainingIds` 与延迟落盘。
+        next = { ...next, watchPaused: false }
       }
       if (next !== persistedNext) {
         const previous = records.get(kbId)
@@ -475,10 +524,12 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
           if (previous === undefined) records.delete(kbId)
           else records.set(kbId, previous)
           recordsVersion += 1
-          if (watchTransition === 'paused') await engine.resumeWatch(kbId).catch(() => undefined)
-          else if (watchTransition === 'resumed') await engine.pauseWatch(kbId).catch(() => undefined)
+          if (wantPause) await engine.resumeWatch(kbId, { awaitReconcile: false }).catch(() => undefined)
           throw error
         }
+      }
+      if (wantResume) {
+        await engine.resumeWatch(kbId, { awaitReconcile: false })
       }
       return next
     } finally {
@@ -487,6 +538,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function remove(kbId: string): Promise<void> {
+    await waitRegistryLoaded()
+    assertNotDisposed()
     const previousRecord = requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
@@ -528,6 +581,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function sync(kbId: string): Promise<void> {
+    await waitRegistryLoaded()
+    assertNotDisposed()
     requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
@@ -536,6 +591,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function rebuild(kbId: string): Promise<void> {
+    await waitRegistryLoaded()
+    assertNotDisposed()
     requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
@@ -549,6 +606,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function listDocs(kbId: string, filter?: ListDocsFilter): Promise<ListDocsResult> {
+    await waitRegistryLoaded()
     requireRecord(kbId)
     assertNotDeleting(kbId)
     return await storage.listDocs(kbId, filter)
@@ -559,17 +617,21 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     query: string
     topK?: number
   }): Promise<readonly KnowledgeSearchHit[]> {
+    await waitRegistryLoaded()
     const query = input.query.trim()
     if (query === '') return []
     const perKb: Array<SingleKbCandidate[]> = []
     let firstError: unknown
     let attempted = 0
-    for (const kbId of input.kbIds) {
+    let succeeded = 0
+    // I-9 修复：对 `kbIds` 去重，且只要至少有一个库查询成功（即便 0 命中）就返回结果而不误抛异常。
+    for (const kbId of new Set(input.kbIds)) {
       const record = records.get(kbId)
       if (record === undefined || deletingIds.has(kbId)) continue
       attempted += 1
       try {
         const raw = await storage.searchFts(kbId, record.name, query, SEARCH_FTS_LIMIT)
+        succeeded += 1
         perKb.push(rerankSingleKbCandidates(raw, query))
       } catch (error) {
         firstError = firstError ?? error
@@ -577,7 +639,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       }
     }
     if (attempted === 0) return []
-    if (perKb.every(list => list.length === 0) && firstError !== undefined) throw firstError
+    if (succeeded === 0 && firstError !== undefined) throw firstError
 
     const merged = mergeMultiKbResults(perKb, query, input.topK)
     if (merged.length === 0) return []
@@ -640,6 +702,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     expectedSha256?: string
     expectedExtractConfigHash?: string
   }): Promise<GetChunkResult> {
+    await waitRegistryLoaded()
     const record = records.get(input.kbId)
     if (record === undefined || deletingIds.has(input.kbId)) {
       return { status: 'kb-removed', kbId: input.kbId, docId: input.docId }
@@ -676,27 +739,19 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     kbId: string,
     eventsOpts?: { limit?: number; filter?: KnowledgeEventFilter },
   ): Promise<readonly KnowledgeEventRecord[]> {
+    await waitRegistryLoaded()
     if (!records.has(kbId)) return []
     return await readKnowledgeEvents(neutralKnowledgeRootPath(profileDir, kbId), eventsOpts)
   }
 
   async function handleSystemResume(): Promise<void> {
     if (disposed) return
-    for (const listener of [...resumeListeners]) {
-      try {
-        listener()
-      } catch {
-        // 监听者异常相互隔离。
-      }
-    }
     await engine.handleSystemResume()
   }
 
+  /** I-9 修复：直接委托给同步引擎，使 powerMonitor 与时钟跳变两条唤醒路径均触达监听者。 */
   function onSystemResume(listener: () => void): () => void {
-    resumeListeners.add(listener)
-    return () => {
-      resumeListeners.delete(listener)
-    }
+    return engine.onSystemResume(listener)
   }
 
   function setOrganizerHooks(hooks: KnowledgeOrganizerHooks): void {
@@ -718,12 +773,13 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   function dispose(): Promise<void> {
     if (disposePromise !== undefined) return disposePromise
     disposed = true
-    resumeListeners.clear()
     const tasks: Array<Promise<unknown>> = []
     // 同步部分先置 disposing 并关闭全部 Watcher（engine.dispose 的首个同步段）。
     tasks.push(engine.dispose())
     tasks.push(pool.dispose(EXTRACTION_POOL_DISPOSE_BUDGET_MS))
     tasks.push(storage.dispose(STORAGE_DISPOSE_BUDGET_MS))
+    // I-1 修复：等待正在进行的原子注册表写入落盘，避免退场中途中断。
+    tasks.push(registryChain.catch(() => undefined))
     const hooks = organizerHooks
     if (hooks !== undefined) {
       tasks.push(Promise.resolve().then(() => hooks.cancelAll()).catch(() => undefined))

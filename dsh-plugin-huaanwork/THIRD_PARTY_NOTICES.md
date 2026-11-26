@@ -368,9 +368,6 @@ This list records package names, versions, licenses, and how each package ships.
 | @mixmark-io/domino | 2.2.0 | BSD-2-Clause | installed |
 | @modelcontextprotocol/client | 2.2.0 | MIT | installed |
 | @modelcontextprotocol/core | 2.2.0 | MIT | installed |
-| @napi-rs/canvas | 1.2.1 | MIT | installed |
-| @napi-rs/canvas-darwin-arm64 | 1.2.1 | MIT | installed |
-| @napi-rs/canvas-darwin-x64 | 1.2.1 | MIT | installed |
 | @noble/hashes | 1.4.0 | MIT | installed |
 | @opentelemetry/api | 1.9.1 | Apache-2.0 | installed |
 | @opentelemetry/api-logs | 0.222.0 | Apache-2.0 | installed |

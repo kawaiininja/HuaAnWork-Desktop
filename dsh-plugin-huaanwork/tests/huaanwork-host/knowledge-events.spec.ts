@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import AdmZip from 'adm-zip'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   appendKnowledgeEvent,
   EVENT_DETAIL_MAX_BYTES,
@@ -17,7 +17,17 @@ import {
 } from '../../src/profile-checkpoint.ts'
 import { exportDesktopDiagnostics } from '../../src/diagnostic-export.ts'
 
+const eventTempDirs: string[] = []
+function makeEventTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  eventTempDirs.push(dir)
+  return dir
+}
+
 describe('knowledge events log and checkpoint/diagnostics exclusion', () => {
+  afterEach(() => {
+    for (const dir of eventTempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
   it('masks secrets before UTF-8 byte truncation and enforces 500 lines / 512 KB bounds', async () => {
     const kbDir = mkdtempSync(join(tmpdir(), 'kb-events-'))
     const longDetail = `Bearer sk-secret-token-1234567890 api_key=abc123456789 ${'中文详情'.repeat(2_000)}`
@@ -129,5 +139,35 @@ describe('knowledge events log and checkpoint/diagnostics exclusion', () => {
     for (const name of entryNames) {
       expect(name).not.toMatch(/knowledge-bases\.json|session-knowledge\.json|session-citations|workspace-knowledge/u)
     }
+  })
+
+  it('bounds injected id/at, drops non-finite count, preserves 4-byte emoji UTF-8 boundary, and serializes concurrent appends (M-6)', async () => {
+    const kbDir = makeEventTempDir('kb-events-m6-')
+    const ev = await appendKnowledgeEvent(kbDir, {
+      id: `sk-SecretId1234567890-${'x'.repeat(300)}`,
+      at: '2026-11-26T00:00:00.000Z-' + 'y'.repeat(200),
+      kind: 'sync_completed',
+      level: 'info',
+      summary: `${'🚀'.repeat(200)}`,
+      count: Number.NaN,
+    })
+    expect(ev.id).not.toContain('SecretId1234567890')
+    expect(Buffer.byteLength(ev.id, 'utf8')).toBeLessThanOrEqual(128)
+    expect(Buffer.byteLength(ev.at, 'utf8')).toBeLessThanOrEqual(64)
+    expect(ev.count).toBeUndefined()
+    expect(Buffer.byteLength(ev.summary, 'utf8')).toBeLessThanOrEqual(EVENT_SUMMARY_MAX_BYTES)
+    expect(ev.summary).not.toContain('\uFFFD')
+
+    // 并发通过等价路径（含 `.` 段）追加 20 条，队列 key 经 resolve() 归一化后零丢条。
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        appendKnowledgeEvent(i % 2 === 0 ? kbDir : join(kbDir, '.'), {
+          kind: 'file_indexed',
+          level: 'info',
+          summary: `parallel-${String(i)}`,
+        })),
+    )
+    const all = await readKnowledgeEvents(kbDir)
+    expect(all).toHaveLength(21)
   })
 })

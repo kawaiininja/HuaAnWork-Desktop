@@ -799,12 +799,20 @@ export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCap
 
   /**
    * 系统休眠恢复桥（R3-I3）：main 侧把 `powerMonitor` 的 `resume` 事件转成 Host
-   * 窄接口回调。返回的取消函数只移除本监听，重复取消是 no-op。
+   * 窄接口回调。每次订阅绑定独立包装函数与 active 标志，重复取消是真正 no-op，
+   * 不会误伤复用同一 `listener` 引用的其他订阅。
    */
   subscribeSystemResume(listener: () => void): () => void {
-    powerMonitor.on('resume', listener)
+    let active = true
+    const handler = (): void => {
+      if (!active) return
+      listener()
+    }
+    powerMonitor.on('resume', handler)
     return () => {
-      powerMonitor.off('resume', listener)
+      if (!active) return
+      active = false
+      powerMonitor.off('resume', handler)
     }
   }
 

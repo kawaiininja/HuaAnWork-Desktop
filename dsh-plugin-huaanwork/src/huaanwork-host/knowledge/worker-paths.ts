@@ -20,15 +20,13 @@ export type KnowledgeWorkerKind = 'storage-worker' | 'extraction-worker'
 
 function findPackageRoot(fromDir: string): string {
   let current = fromDir
-  let highest = fromDir
   for (let depth = 0; depth < MAX_PACKAGE_ROOT_WALK_DEPTH; depth += 1) {
     if (existsSync(join(current, 'package.json'))) return current
-    highest = current
     const parent = dirname(current)
-    if (parent === current) return current
+    if (parent === current) break
     current = parent
   }
-  return highest
+  throw new Error(`resolveKnowledgeWorkerUrl: could not locate package.json above ${fromDir}`)
 }
 
 /**

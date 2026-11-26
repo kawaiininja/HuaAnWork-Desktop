@@ -16,16 +16,19 @@
 
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { maskSecrets } from '../../mask-secrets.ts'
+import { foldAsciiPath } from './paths.ts'
 import type { KnowledgeEventKind, KnowledgeEventLevel, KnowledgeEventRecord } from './types.ts'
 
 export const EVENT_MAX_LINES = 500
 export const EVENT_MAX_BYTES = 512 * 1024
 export const EVENT_SUMMARY_MAX_BYTES = 512
 export const EVENT_DETAIL_MAX_BYTES = 4 * 1024
+const EVENT_ID_MAX_BYTES = 128
+const EVENT_AT_MAX_BYTES = 64
 
 const EVENTS_FILENAME = 'events.jsonl'
 const EVENTS_FILE_MODE = 0o600
@@ -108,20 +111,27 @@ function sanitizeText(text: string, maxBytes: number): string {
 
 /** 构造一条脱敏并裁剪后的完整记录；可选字段缺省时不出现在 JSON 中。 */
 function buildRecord(input: AppendKnowledgeEventInput): KnowledgeEventRecord {
+  const sanitizedId = input.id !== undefined && input.id !== ''
+    ? sanitizeText(input.id, EVENT_ID_MAX_BYTES)
+    : ''
+  const sanitizedAt = input.at !== undefined && input.at !== ''
+    ? sanitizeText(input.at, EVENT_AT_MAX_BYTES)
+    : ''
   const summary = sanitizeText(input.summary, EVENT_SUMMARY_MAX_BYTES)
   const detail = input.detail === undefined
     ? undefined
     : sanitizeText(input.detail, EVENT_DETAIL_MAX_BYTES)
   const relPath = input.relPath === undefined ? undefined : sanitizeText(input.relPath, EVENT_DETAIL_MAX_BYTES)
+  const count = typeof input.count === 'number' && Number.isFinite(input.count) ? input.count : undefined
   return {
-    id: input.id ?? randomUUID(),
-    at: input.at ?? new Date().toISOString(),
+    id: sanitizedId === '' ? randomUUID() : sanitizedId,
+    at: sanitizedAt === '' ? new Date().toISOString() : sanitizedAt,
     kind: input.kind,
     level: input.level,
     summary,
     ...(detail === undefined ? {} : { detail }),
     ...(relPath === undefined ? {} : { relPath }),
-    ...(input.count === undefined ? {} : { count: input.count }),
+    ...(count === undefined ? {} : { count }),
   }
 }
 
@@ -215,6 +225,11 @@ async function appendRecord(filePath: string, record: KnowledgeEventRecord): Pro
 /** 按事件文件路径串行化读改写（同 kbDir 排队，跨库互不阻塞）。 */
 const appendQueues = new Map<string, Promise<void>>()
 
+function queueKeyForPath(filePath: string): string {
+  const resolved = resolve(filePath)
+  return process.platform === 'win32' ? foldAsciiPath(resolved) : resolved
+}
+
 /**
  * 追加一条事件：先脱敏/截断，再入队串行读改写 `events.jsonl`，最后以
  * `writeFileAtomic + 0o600` 落盘。返回实际写入（或前端可见）的记录。
@@ -224,8 +239,9 @@ export function appendKnowledgeEvent(
   input: AppendKnowledgeEventInput,
 ): Promise<KnowledgeEventRecord> {
   const filePath = eventsPath(kbDir)
+  const queueKey = queueKeyForPath(filePath)
   const record = buildRecord(input)
-  const previous = appendQueues.get(filePath) ?? Promise.resolve()
+  const previous = appendQueues.get(queueKey) ?? Promise.resolve()
   const run = previous
     .catch(() => undefined)
     .then(async () => {
@@ -233,9 +249,9 @@ export function appendKnowledgeEvent(
       return record
     })
   const tracked = run.then(() => undefined, () => undefined)
-  appendQueues.set(filePath, tracked)
+  appendQueues.set(queueKey, tracked)
   return run.finally(() => {
-    if (appendQueues.get(filePath) === tracked) appendQueues.delete(filePath)
+    if (appendQueues.get(queueKey) === tracked) appendQueues.delete(queueKey)
   })
 }
 

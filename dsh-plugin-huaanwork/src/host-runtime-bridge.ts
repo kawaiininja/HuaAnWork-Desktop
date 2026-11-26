@@ -191,14 +191,23 @@ export function createHostRuntime(
     // 不进 interactive 名单:powerSaveBlocker 是即时调用,沿用默认 RPC 超时。
     setKeepAwake: hold => send('native:setKeepAwake', [hold]),
     // 系统休眠恢复（R3-I3）：main 侧监听 powerMonitor 后经回调 ID 反向推送；
-    // 取消时先释放本地回调 handler，再通知 main 卸载监听。
+    // 取消幂等：先置 active=false 并释放本地回调 handler，再通知 main 卸载监听。
     subscribeSystemResume(listener: () => void): () => void {
-      const callback = callbacks({ resume: listener })
-      send('native:subscribeSystemResume', [callback.id]).catch(error => {
-        process.stderr.write(`${String(error)}\n`)
+      let active = true
+      const callback = callbacks({
+        resume: () => {
+          if (active) listener()
+        },
+      })
+      void send('native:subscribeSystemResume', [callback.id]).catch(() => {
+        // send() 已统一将失败写入 stderr；此处仅做幂等清理，不重复输出。
+        if (!active) return
+        active = false
         callback.release()
       })
       return () => {
+        if (!active) return
+        active = false
         callback.release()
         void send('native:unsubscribeSystemResume', [callback.id])
       }
@@ -331,8 +340,10 @@ export function bindNativeRuntime(rpc: HostRpc, runtime: DesktopRuntime): HostNa
     if (typeof id !== 'string' || id === '') {
       throw new Error('native:subscribeSystemResume requires a callback id')
     }
-    // 同一 ID 重复订阅按替换处理，避免残留旧监听。
-    resumeSubscriptions.get(id)?.()
+    // 同一 ID 重复订阅按替换处理：先移出旧映射再释放，避免新订阅失败时残留旧监听。
+    const previous = resumeSubscriptions.get(id)
+    resumeSubscriptions.delete(id)
+    previous?.()
     const subscribe = (runtime as SystemResumeRuntime).subscribeSystemResume
     if (typeof subscribe !== 'function') return undefined
     const release = subscribe.call(runtime, () => {

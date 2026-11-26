@@ -20,7 +20,7 @@ import { disableAsarArchiveView } from '../../asar-archive-policy.ts'
 import { chunkExtractedDocument } from './chunker.ts'
 import { extractFromBuffer } from './extractors/index.ts'
 import { blockOptionalCanvasAddon } from './extractors/pdf-text.ts'
-import { openVerifiedSourceFile, readAndHashHandle } from './safe-read.ts'
+import { hashHandle, openVerifiedSourceFile, readAndHashHandle } from './safe-read.ts'
 import { MAX_FILE_BYTES } from './types.ts'
 import type {
   ExtractionFileRequest,
@@ -74,13 +74,16 @@ async function extractOne(request: ExtractionFileRequest): Promise<ExtractionFil
     }
   }
   try {
-    const read = await readAndHashHandle(opened.handle, maxBytes ?? MAX_FILE_BYTES)
-    if (!read.ok) return { ok: false, reason: 'file-too-large', error: 'file exceeds the byte budget' }
     const size = Number(opened.stat.size)
     const mtimeMs = Number(opened.stat.mtimeMs)
     if (request.hashOnly === true) {
-      return { ok: true, hashOnly: true, sha256: read.sha256, size, mtimeMs }
+      // `hashOnly` 通道零缓冲流式算 SHA-256，避免把 50 MB 文件翻倍缓存在 256 MB Worker 堆上（I-8）。
+      const hashed = await hashHandle(opened.handle, maxBytes ?? MAX_FILE_BYTES)
+      if (!hashed.ok) return { ok: false, reason: 'file-too-large', error: 'file exceeds the byte budget' }
+      return { ok: true, hashOnly: true, sha256: hashed.sha256, size, mtimeMs }
     }
+    const read = await readAndHashHandle(opened.handle, maxBytes ?? MAX_FILE_BYTES)
+    if (!read.ok) return { ok: false, reason: 'file-too-large', error: 'file exceeds the byte budget' }
     const maxDocTextBytes = request.maxDocTextBytes
     const doc = await extractFromBuffer({
       buffer: read.buffer,
@@ -91,12 +94,16 @@ async function extractOne(request: ExtractionFileRequest): Promise<ExtractionFil
       doc,
       maxDocTextBytes === undefined ? {} : { maxTextBytes: maxDocTextBytes },
     )
+    // 切片触及 500 片 / 文本上限时把 `indexed` 提升为 `partial: 'text-truncated'`，绝不静默丢内容（I-6）。
+    const finalDoc = chunked.truncated && doc.status === 'indexed'
+      ? { ...doc, status: 'partial' as const, statusReason: 'text-truncated' }
+      : doc
     return {
       ok: true,
       sha256: read.sha256,
       size,
       mtimeMs,
-      doc,
+      doc: finalDoc,
       chunks: chunked.chunks,
       truncated: chunked.truncated,
     }
@@ -115,7 +122,12 @@ async function handle(message: ExtractionWorkerRequest): Promise<void> {
     result = { ok: false, reason: 'read-error', error: describeError(error) }
   }
   const response: ExtractionWorkerResponse = { id: message.id, ok: true, result }
-  parentPort?.postMessage(response)
+  try {
+    parentPort?.postMessage(response)
+  } catch (error) {
+    const fallback: ExtractionWorkerResponse = { id: message.id, ok: false, error: describeError(error) }
+    parentPort?.postMessage(fallback)
+  }
 }
 
 // 模块图（含提取器）加载完成后再宣布就绪：池从此刻起才计入单文件超时。

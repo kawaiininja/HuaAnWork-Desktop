@@ -293,6 +293,39 @@ it('pins the system-resume RPC seam: unconditional handlers, callback flow, sile
   release()
   expect(calls[1]).toEqual({ method: 'native:unsubscribeSystemResume', args: ['callback:1'] })
   expect(hostHandlers.has('callback:1:resume')).toBe(false)
+  // I-10 回归：重复取消是真正 no-op，不得再发第二次 unsubscribe RPC。
+  release()
+  expect(calls).toHaveLength(2)
+
+  // I-10 回归：订阅 RPC 拒绝时清理本地回调且只经 send() 写一次 stderr，随后再取消不再发 RPC。
+  const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  try {
+    const failingCalls: string[] = []
+    const failingHandlers = new Map<string, (...args: any[]) => unknown>()
+    const failingChild = {
+      call: (method: string) => {
+        failingCalls.push(method)
+        return Promise.reject(new Error('subscribe-failed'))
+      },
+      handle: (name: string, handler: (...args: any[]) => unknown) => {
+        failingHandlers.set(name, handler)
+        return () => { failingHandlers.delete(name) }
+      },
+    } as unknown as HostRpc
+    const failingRuntime = createHostRuntime(failingChild, {
+      platform: 'win32', locale: 'en',
+      updates: { isPackaged: true, canDownload: true, currentVersion: '2.0.0', statePath: '/tmp/update' },
+    }) as SystemResumeRuntime
+    const releaseFailed = failingRuntime.subscribeSystemResume!(vi.fn())
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(failingHandlers.size).toBe(0)
+    expect(stderrSpy).toHaveBeenCalledTimes(1)
+    releaseFailed()
+    expect(failingCalls).toEqual(['native:subscribeSystemResume'])
+  } finally {
+    stderrSpy.mockRestore()
+  }
 
   // main 侧：两个 handler 无条件注册；有能力的 runtime 挂上/卸载 powerMonitor 监听。
   const mainHandlers = new Map<string, (args: any[], signal: AbortSignal) => unknown>()
