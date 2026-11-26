@@ -358,3 +358,42 @@ export function buildPasswordProtectedPdf(): Buffer {
   const trailer = `trailer\n<< /Size ${String(objects.length + 1)} /Root 1 0 R /Encrypt 3 0 R /ID [<0123456789abcdef> <0123456789abcdef>] >>\nstartxref\n${String(xrefPos)}\n%%EOF\n`
   return Buffer.from(body + xref + trailer, 'latin1')
 }
+
+/** 构造多页 ASCII / 空白混合 PDF（空字符串页触发 `needs-vision`，用于预算与早停回归）。 */
+export function buildMultiPageAsciiPdf(pages: readonly string[]): Buffer {
+  const pageCount = pages.length
+  const fontObjNum = 3
+  const kidsRefs: string[] = []
+  const objects: string[] = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '', // placeholder for 2: Pages
+    `${String(fontObjNum)} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n`,
+  ]
+  for (let i = 0; i < pageCount; i += 1) {
+    const pageObjNum = 4 + i * 2
+    const contentObjNum = pageObjNum + 1
+    kidsRefs.push(`${String(pageObjNum)} 0 R`)
+    const escaped = (pages[i] ?? '').replace(/\\/gu, '\\\\').replace(/\(/gu, '\\(').replace(/\)/gu, '\\)')
+    const stream = escaped === '' ? '' : `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`
+    objects.push(
+      `${String(pageObjNum)} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${String(fontObjNum)} 0 R >> >> /Contents ${String(contentObjNum)} 0 R >>\nendobj\n`,
+      `${String(contentObjNum)} 0 obj\n<< /Length ${String(Buffer.byteLength(stream, 'latin1'))} >>\nstream\n${stream}\nendstream\nendobj\n`,
+    )
+  }
+  objects[1] = `2 0 obj\n<< /Type /Pages /Kids [${kidsRefs.join(' ')}] /Count ${String(pageCount)} >>\nendobj\n`
+
+  const header = '%PDF-1.4\n'
+  let body = header
+  const offsets: number[] = [0]
+  for (const obj of objects) {
+    offsets.push(Buffer.byteLength(body, 'latin1'))
+    body += obj
+  }
+  const xrefPos = Buffer.byteLength(body, 'latin1')
+  let xref = `xref\n0 ${String(objects.length + 1)}\n0000000000 65535 f \n`
+  for (let i = 1; i < offsets.length; i += 1) {
+    xref += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`
+  }
+  const trailer = `trailer\n<< /Size ${String(objects.length + 1)} /Root 1 0 R >>\nstartxref\n${String(xrefPos)}\n%%EOF\n`
+  return Buffer.from(body + xref + trailer, 'latin1')
+}

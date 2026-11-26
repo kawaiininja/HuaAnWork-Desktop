@@ -127,7 +127,7 @@ export interface KnowledgeHost {
   onSystemResume(listener: () => void): () => void
   /** M1-2 注入：维护/删库/退场时取消该库在途整理并 await 单槽释放。 */
   setOrganizerHooks(hooks: KnowledgeOrganizerHooks): void
-  /** M1-3 注入：删库完成后清理会话挂载。 */
+  /** M1-3 注入：删库已提交后的 best-effort 清理钩子（如会话挂载清理），异常仅记告警不撤销删库。 */
   setRemovalHook(hook: (kbId: string) => Promise<void>): void
   isWorkersRunning(): boolean
   isWatchingForTest(kbId: string): boolean
@@ -231,6 +231,26 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       () => writeKnowledgeBases(profileDir, [...records.values()]),
       () => writeKnowledgeBases(profileDir, [...records.values()]),
     )
+    registryChain = run.catch(() => undefined)
+    return run
+  }
+
+  /**
+   * 在 `registryChain` 串行槽内变更内存并原子落盘；若落盘失败则立刻在槽内回滚内存，
+   * 杜绝并发写将未提交记录刷盘，也避免失败路径需要二次写盘回滚。
+   */
+  function commitRegistryChange(mutate: () => void, rollback: () => void): Promise<void> {
+    const step = async (): Promise<void> => {
+      assertNotDisposed()
+      mutate()
+      try {
+        await writeKnowledgeBases(profileDir, [...records.values()])
+      } catch (error) {
+        rollback()
+        throw error
+      }
+    }
+    const run = registryChain.then(step, step)
     registryChain = run.catch(() => undefined)
     return run
   }
@@ -385,19 +405,24 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     }
     const kbRoot = neutralKnowledgeRootPath(profileDir, id)
     await mkdir(kbRoot, { recursive: true, mode: 0o700 })
-    records.set(id, record)
-    recordsVersion += 1
-    statsCache.set(id, ZERO_STATS)
     try {
-      await persistRegistry()
       await engine.startKb(record)
+      await commitRegistryChange(
+        () => {
+          records.set(id, record)
+          recordsVersion += 1
+          statsCache.set(id, ZERO_STATS)
+        },
+        () => {
+          records.delete(id)
+          recordsVersion += 1
+          statsCache.delete(id)
+        },
+      )
     } catch (error) {
-      // 注册表与磁盘保持成对：启动失败时先停机释放 runtime/Watcher，再回滚记录与中立目录（I-1）。
-      records.delete(id)
-      recordsVersion += 1
-      statsCache.delete(id)
+      // 先 `startKb` 再在串行写槽内原子登记并落盘：`startKb` 或写盘任一步失败都不会在磁盘留孤儿注册项，
+      // 只需停机释放 runtime/Watcher/SQLite 并删除中立目录（I-1 / Minor 2）。
       await engine.stopKb(id).catch(() => undefined)
-      await persistRegistry().catch(() => undefined)
       await rm(kbRoot, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
@@ -572,7 +597,12 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
         throw error
       }
       if (removalHook !== undefined) {
-        await removalHook(kbId)
+        try {
+          await removalHook(kbId)
+        } catch (hookError) {
+          // 删库已落盘提交：提交后通知钩子失败仅记告警，避免调用方误以为删库失败而重试得 not-found。
+          console.warn(`[knowledge] post-remove hook failed for ${kbId}: ${String(hookError)}`)
+        }
       }
     } finally {
       release?.()

@@ -703,6 +703,64 @@ describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', (
       expect(searchFts(afterWal.db, { kbId: 'k', kbName: 'K', query: '增量' })).toHaveLength(1)
       afterWal.db.close()
     }
+
+    // 3. N-1：已提交分支（无 .rebuild）残留旧库 .bak + 未 checkpoint 的 .bak-wal 时，绝不嫁接旧 WAL 到新主库。
+    const oldWalSourceDir = makeStorageTempDir('kb-n1-old-wal-')
+    let oldBakBytes: Buffer = Buffer.alloc(0)
+    let oldWalBytes: Buffer = Buffer.alloc(0)
+    const oldOpened = openKnowledgeDb(oldWalSourceDir)
+    expect(oldOpened.ok).toBe(true)
+    if (oldOpened.ok) {
+      oldOpened.db.exec('PRAGMA wal_autocheckpoint = 0')
+      upsertDocumentWithChunks(oldOpened.db, {
+        relPath: 'old-wal.md', normPath: 'old-wal.md', sha256: 'sha-old-wal', size: 12, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '旧库未落盘回滚数据')],
+      })
+      oldBakBytes = readFileSync(join(oldWalSourceDir, 'index.sqlite'))
+      oldWalBytes = readFileSync(join(oldWalSourceDir, 'index.sqlite-wal'))
+      expect(oldWalBytes.byteLength).toBeGreaterThan(0)
+      oldOpened.db.close()
+    }
+
+    const committedDir = makeStorageTempDir('kb-n1-committed-')
+    const committedStaging = beginRebuildStaging(committedDir)
+    committedStaging.upsert({
+      relPath: 'fresh-commit.md', normPath: 'fresh-commit.md', sha256: 'sha-fresh', size: 12, mtimeMs: 2,
+      format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+      chunks: [sampleChunk(0, '新提交权威索引数据')],
+    })
+    expect(commitRebuildStaging(committedDir, committedStaging)).toMatchObject({ ok: true })
+    // 模拟 Step 2 提交后、removeBackups 前崩溃：新 index.sqlite 无 -wal、无 .rebuild，盘上残留旧 .bak 与 .bak-wal。
+    rmSync(join(committedDir, 'index.sqlite-wal'), { force: true })
+    rmSync(join(committedDir, 'index.sqlite-shm'), { force: true })
+    writeFileSync(join(committedDir, 'index.sqlite.bak'), oldBakBytes)
+    writeFileSync(join(committedDir, 'index.sqlite.bak-wal'), oldWalBytes)
+
+    const afterCommittedCrash = openKnowledgeDb(committedDir)
+    expect(afterCommittedCrash.ok).toBe(true)
+    if (afterCommittedCrash.ok) {
+      expect(searchFts(afterCommittedCrash.db, { kbId: 'k', kbName: 'K', query: '新提交权威' })).toHaveLength(1)
+      expect(searchFts(afterCommittedCrash.db, { kbId: 'k', kbName: 'K', query: '旧库未落盘' })).toHaveLength(0)
+      expect(existsSync(join(committedDir, 'index.sqlite.bak'))).toBe(false)
+      expect(existsSync(join(committedDir, 'index.sqlite.bak-wal'))).toBe(false)
+      afterCommittedCrash.db.close()
+    }
+
+    // 4. N-1 二次路径：上次提交清扫失败残留过期 .bak-wal 时，下一次 beginRebuildStaging 先清扫再建 .rebuild。
+    rmSync(join(committedDir, 'index.sqlite-wal'), { force: true })
+    rmSync(join(committedDir, 'index.sqlite-shm'), { force: true })
+    writeFileSync(join(committedDir, 'index.sqlite.bak-wal'), oldWalBytes)
+    const secondStaging = beginRebuildStaging(committedDir)
+    expect(existsSync(join(committedDir, 'index.sqlite.bak-wal'))).toBe(false)
+    secondStaging.abort()
+    const afterSecondAbort = openKnowledgeDb(committedDir)
+    expect(afterSecondAbort.ok).toBe(true)
+    if (afterSecondAbort.ok) {
+      expect(searchFts(afterSecondAbort.db, { kbId: 'k', kbName: 'K', query: '新提交权威' })).toHaveLength(1)
+      expect(searchFts(afterSecondAbort.db, { kbId: 'k', kbName: 'K', query: '旧库未落盘' })).toHaveLength(0)
+      afterSecondAbort.db.close()
+    }
   })
 
   it('preserves committed wiki-reset.pending across later uncommitted rebuild crash (I-3), guards negative/NaN chunk inputs (I-6), aligns FTS rowid & supports relaxed Chinese search (I-7), and checks extractConfigHash + UTF-8 organize budget (M-3)', () => {

@@ -2,8 +2,11 @@ import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, 
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Worker } from 'node:worker_threads'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
+import type { ExtractionWorkerReadyMessage, ExtractionWorkerResponse } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
+import { resolveKnowledgeWorkerUrl } from '../../src/huaanwork-host/knowledge/worker-paths.ts'
 import { hashHandle, openVerifiedSourceFile, readAndHashHandle, walkSourceDirectory } from '../../src/huaanwork-host/knowledge/safe-read.ts'
 import { computeExtractConfigHash, extractFromBuffer, TEXT_EXTENSIONS } from '../../src/huaanwork-host/knowledge/extractors/index.ts'
 import { decodeHtmlEntities } from '../../src/huaanwork-host/knowledge/extractors/text.ts'
@@ -15,6 +18,7 @@ import {
   buildMinimalDocx,
   buildMinimalPptx,
   buildMinimalXlsx,
+  buildMultiPageAsciiPdf,
   buildOverEntryLimitZipDocx,
   buildPasswordProtectedPdf,
   buildRichSelfClosingXlsx,
@@ -261,7 +265,42 @@ describe('knowledge safe-read chain and document extractors', () => {
       await pool.dispose()
     }
 
-    // I-1：当前进程执行过 pdf-text 后，@napi-rs/canvas 解析被 registerHooks 拦截且未进入 require.cache。
+    // I-1（Minor 6）：直接在真实 Extraction Worker 线程内验证 pdf.mjs 加载时拦截了 @napi-rs/canvas，
+    // 而不只在 Vitest 主进程断言。
+    const directWorker = new Worker(resolveKnowledgeWorkerUrl('extraction-worker'), { stderr: true })
+    let workerStderr = ''
+    directWorker.stderr?.setEncoding('utf8')
+    directWorker.stderr?.on('data', (chunk: string) => {
+      workerStderr += chunk
+    })
+    try {
+      const workerResult = await new Promise<ExtractionWorkerResponse>((resolve, reject) => {
+        directWorker.once('error', reject)
+        directWorker.on('message', (msg: ExtractionWorkerReadyMessage | ExtractionWorkerResponse) => {
+          if ('ready' in msg && msg.ready) {
+            directWorker.postMessage({
+              id: 1,
+              request: {
+                sourceRoot: dir,
+                filePath: pdfPath,
+                relPath: 'cid-only.pdf',
+              },
+            })
+            return
+          }
+          resolve(msg as ExtractionWorkerResponse)
+        })
+      })
+      expect(workerResult.ok).toBe(true)
+      if (workerResult.ok && workerResult.result.ok && workerResult.result.hashOnly !== true) {
+        expect(workerResult.result.doc.sections.map(s => s.text).join('')).toContain('产品合规说明书')
+      }
+      expect(workerStderr).toContain('@napi-rs/canvas is disabled in knowledge extraction')
+    } finally {
+      await directWorker.terminate()
+    }
+
+    // I-1：当前进程执行过 pdf-text 后，@napi-rs/canvas 解析同样被 registerHooks 拦截且未进入 require.cache。
     const req = createRequire(import.meta.url)
     expect(() => req('@napi-rs/canvas')).toThrow(/MODULE_NOT_FOUND|disabled/u)
     expect(Object.keys(req.cache).filter(key => key.includes('@napi-rs/canvas'))).toEqual([])
@@ -345,6 +384,49 @@ describe('knowledge safe-read chain and document extractors', () => {
     // I-8：密码保护 PDF 归类为 skipped: 'encrypted'（与 OOXML 对齐）。
     const encPdf = await extractFromBuffer({ buffer: buildPasswordProtectedPdf(), ext: '.pdf' })
     expect(encPdf).toMatchObject({ status: 'skipped', statusReason: 'encrypted' })
+
+    // qwen4 Minor 1：Markdown 标题行对 `#`×40,000 + `a` 保持 O(N) 线性耗时，且正确保留 `# C#` 与剥离闭合 `###`。
+    const headingStart = performance.now()
+    const pathologicalMd = await extractFromBuffer({
+      buffer: Buffer.from(`# ${'#'.repeat(40_000)}a\n正文内容\n`, 'utf8'),
+      ext: '.md',
+    })
+    expect(performance.now() - headingStart).toBeLessThan(500)
+    expect(pathologicalMd.status).toBe('indexed')
+    const csharpMd = await extractFromBuffer({
+      buffer: Buffer.from('# C#\n首段\n## 闭合标题 ###  \n次段\n# ###\n三段\n', 'utf8'),
+      ext: '.md',
+    })
+    expect(csharpMd.sections.some(s => s.headingPath === 'C#')).toBe(true)
+    expect(csharpMd.sections.some(s => s.headingPath === 'C# > 闭合标题')).toBe(true)
+
+    // qwen4 Minor 4：PDF 预算在首页精确用尽后，后续扫描/空白页立即早停并标 text-truncated，不误标 partial-needs-vision。
+    const page1Text = 'A'.repeat(40)
+    const multiPagePdf = buildMultiPageAsciiPdf([page1Text, '', ''])
+    const exactBudgetPdf = await extractFromBuffer({
+      buffer: multiPagePdf,
+      ext: '.pdf',
+      maxDocTextBytes: Buffer.byteLength(page1Text, 'utf8'),
+    })
+    expect(exactBudgetPdf).toMatchObject({
+      status: 'partial',
+      statusReason: 'text-truncated',
+      extractMode: 'text',
+      totalPages: 3,
+      parsedPages: 1,
+    })
+    const ampleBudgetPdf = await extractFromBuffer({
+      buffer: multiPagePdf,
+      ext: '.pdf',
+      maxDocTextBytes: 10_000,
+    })
+    expect(ampleBudgetPdf).toMatchObject({
+      status: 'partial',
+      statusReason: 'partial-needs-vision',
+      extractMode: 'mixed',
+      totalPages: 3,
+      parsedPages: 1,
+    })
   })
 
   it('blocks in-source UNC symlinks (C-4), stops subdir loops on hop 1 and realpath-mismatched checkPathSegments (I-5), streams hashHandle (I-8), maps open ELOOP to inode-replaced (M-5), and marks 500-chunk truncation as partial (I-6)', async () => {
@@ -425,5 +507,16 @@ describe('knowledge safe-read chain and document extractors', () => {
     } finally {
       await pool.dispose()
     }
+
+    // qwen4 Minor 5：普通目录触发目录数上限时必须上报 `max-dirs-exceeded`，不得误报 `symlink-loop`。
+    const capDir = makeExtractorTempDir('kb-walk-dir-cap-')
+    mkdirSync(join(capDir, 'd1'), { recursive: true })
+    mkdirSync(join(capDir, 'd2'), { recursive: true })
+    mkdirSync(join(capDir, 'd3'), { recursive: true })
+    writeFileSync(join(capDir, 'd1', 'a.txt'), 'a')
+    writeFileSync(join(capDir, 'd2', 'b.txt'), 'b')
+    const cappedWalk = await walkSourceDirectory(capDir, { maxWalkedDirs: 1 })
+    expect(cappedWalk.skipped.some(s => s.reason === 'max-dirs-exceeded')).toBe(true)
+    expect(cappedWalk.skipped.some(s => s.reason === 'symlink-loop')).toBe(false)
   })
 })

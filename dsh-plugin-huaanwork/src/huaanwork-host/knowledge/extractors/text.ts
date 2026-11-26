@@ -338,6 +338,28 @@ function* iterateTextLines(text: string): Generator<string> {
 }
 
 /**
+ * O(N) 解析 Markdown ATX 标题行（消除 `/(.+?)\s*#*\s*$/` 在大量 `#` 时的二次回溯）：
+ * 遵循 CommonMark 规则，仅当尾部闭合 `#` 前紧邻空白（或整段均为 `#`）时剥离，保留如 `# C#`。
+ */
+function parseMarkdownHeading(line: string): { readonly level: number; readonly text: string } | null {
+  const match = /^\s{0,3}(#{1,6})\s+(.*)$/u.exec(line)
+  if (match === null) return null
+  const level = match[1]?.length ?? 1
+  const raw = match[2] ?? ''
+  let end = raw.length
+  while (end > 0 && /\s/u.test(raw[end - 1] ?? '')) end -= 1
+  let hashEnd = end
+  while (hashEnd > 0 && raw[hashEnd - 1] === '#') hashEnd -= 1
+  if (hashEnd < end && (hashEnd === 0 || /\s/u.test(raw[hashEnd - 1] ?? ''))) {
+    end = hashEnd
+    while (end > 0 && /\s/u.test(raw[end - 1] ?? '')) end -= 1
+  }
+  const headingText = raw.slice(0, end)
+  if (headingText === '') return null
+  return { level, text: headingText }
+}
+
+/**
  * 把逐行文本分组为带行号坐标的 section；标题行开启新 section。
  * - Markdown 围栏代码块（`` ``` `` / `~~~`）内的 `#` 注释不再误判为标题（M-5）；
  * - 累计产出字节超出 `maxDocTextBytes` 时立即早停截断，避免对超大文件构建多余 section（I-8）。
@@ -420,15 +442,13 @@ function buildLineSectionsFromText(
       }
     }
     if (opts.detectHeadings && fenceChar === null) {
-      const heading = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(line)
+      const heading = parseMarkdownHeading(line)
       if (heading !== null) {
         if (flush()) return { sections, truncated: true }
-        const level = heading[1]?.length ?? 1
-        const headingText = heading[2] ?? ''
-        while (headingStack.length > 0 && (headingStack[headingStack.length - 1]?.level ?? 0) >= level) {
+        while (headingStack.length > 0 && (headingStack[headingStack.length - 1]?.level ?? 0) >= heading.level) {
           headingStack.pop()
         }
-        headingStack.push({ level, text: headingText })
+        headingStack.push(heading)
         headingPath = headingStack.map(entry => entry.text).join(' > ')
       }
     }

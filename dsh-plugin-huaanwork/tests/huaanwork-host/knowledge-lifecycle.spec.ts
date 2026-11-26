@@ -718,7 +718,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
         }
       }
 
-      // I-1：create() 在 startKb 失败回滚时，不残留僵尸 runtime / 目录。
+      // I-1 / qwen4 Minor 2：create() 在 startKb 失败时从未落盘注册表，不残留孤儿注册项 / runtime / 目录。
       const openSpy = vi.spyOn(storage, 'openKb').mockRejectedValueOnce(new Error('simulated-open-crash'))
       const dirFail = join(root, 'docs-fail')
       mkdirSync(dirFail, { recursive: true })
@@ -728,6 +728,41 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
         openSpy.mockRestore()
       }
       expect((await host.list()).some(k => k.name === '失败库')).toBe(false)
+      expect(readRegistryRecords(profileDir).some(r => r.sourceDir === dirFail)).toBe(false)
+
+      // qwen4 Minor 2：startKb 成功后 persistRegistry 失败时，停机回滚内存与中立目录且磁盘零孤儿项。
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        const dirPersistFail = join(root, 'docs-persist-fail')
+        mkdirSync(dirPersistFail, { recursive: true })
+        chmodSync(profileDir, 0o500)
+        try {
+          await expect(host.create({ name: '落盘失败库', sourceDir: dirPersistFail })).rejects.toThrow()
+        } finally {
+          chmodSync(profileDir, 0o700)
+        }
+        expect((await host.list()).some(k => k.name === '落盘失败库')).toBe(false)
+        expect(readRegistryRecords(profileDir).some(r => r.sourceDir === dirPersistFail)).toBe(false)
+      }
+
+      // qwen4 Minor 3：remove() 删目录并落盘注册表成功后，removalHook 抛错仅记告警，不让已提交删库伪失败。
+      const dirHookFail = join(root, 'docs-hook-fail')
+      mkdirSync(dirHookFail, { recursive: true })
+      const kbHook = await host.create({ name: '钩子容错库', sourceDir: dirHookFail })
+      const hookSpy = vi.fn(async () => {
+        throw new Error('simulated-removal-hook-failure')
+      })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      host.setRemovalHook(hookSpy)
+      try {
+        await expect(host.remove(kbHook.id)).resolves.toBeUndefined()
+        expect(hookSpy).toHaveBeenCalledWith(kbHook.id)
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('post-remove hook failed'))
+        expect(host.get(kbHook.id)).toBeUndefined()
+        expect(readRegistryRecords(profileDir).some(r => r.id === kbHook.id)).toBe(false)
+        expect(existsSync(neutralKnowledgeRootPath(profileDir, kbHook.id))).toBe(false)
+      } finally {
+        warnSpy.mockRestore()
+      }
 
       // I-1：dispose() 之后所有写操作显式报 knowledge-base-busy。
       await host.dispose()

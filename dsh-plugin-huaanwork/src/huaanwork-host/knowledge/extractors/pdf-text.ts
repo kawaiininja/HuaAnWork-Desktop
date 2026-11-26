@@ -220,6 +220,11 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
     let usedBytes = 0
 
     for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      // 文本字节预算耗尽且仍有未处理页时立即早停，避免继续解析大量扫描/空白页。
+      if (usedBytes >= budget) {
+        truncated = true
+        break
+      }
       const page = await pdf.getPage(pageNumber)
       let text: string
       try {
@@ -230,10 +235,6 @@ export async function extractPdfTextDocument(input: PdfTextExtractionInput): Pro
       if (countNonWhitespace(text) < MIN_TEXT_PAGE_CHARS) {
         needsVisionPages += 1
         continue
-      }
-      if (usedBytes >= budget) {
-        truncated = true
-        break
       }
       let pageText = text
       const pageBytes = Buffer.byteLength(pageText, 'utf8')

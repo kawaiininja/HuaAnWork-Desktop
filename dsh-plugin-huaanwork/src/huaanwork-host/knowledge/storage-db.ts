@@ -474,13 +474,18 @@ function markWikiResetPendingCommittedSync(kbDir: string): void {
 }
 
 /**
- * 把 `.bak*` 还原回主库（C-2 修复）：
+ * 把 `.bak*` 还原回主库（C-2 / N-1 修复）：
  * 先搬回 `.bak-wal` / `.bak-shm`，再把 `.bak` 原子重命名为 `index.sqlite`。
  * 这样若在 WAL 已搬回但主库尚未搬回时崩溃，下次恢复仍见 `!main && backup` 继续
  * 搬回主库；不会再出现「主库先回、WAL 滞留 `.bak-wal` 后被当作垃圾删掉」的数据丢失。
- * 同时兜底兼容「主库已存在、主库无 WAL 但 `.bak-wal` 仍在」的残留半还原现场。
+ * 「主库已存在、主库无 WAL 但 `.bak-wal` 仍在」的半还原兜底仅允许在未提交分支
+ * （`allowHalfRestoredWal: true`，即 `.rebuild` 仍在）执行，绝不允许在已提交分支
+ * 把旧库 `.bak-wal` 嫁接到已提交的新主库（D17 提交后绝不回滚）。
  */
-function restoreBackupToMain(kbDir: string, opts?: CommitRebuildOptions): boolean {
+function restoreBackupToMain(
+  kbDir: string,
+  opts?: CommitRebuildOptions & { readonly allowHalfRestoredWal?: boolean },
+): boolean {
   const main = dbPath(kbDir)
   const backup = `${main}${BACKUP_SUFFIX}`
   const backupWal = `${backup}${WAL_SUFFIX}`
@@ -492,7 +497,12 @@ function restoreBackupToMain(kbDir: string, opts?: CommitRebuildOptions): boolea
     moveIfExists(backupWal, mainWal)
     moveIfExists(backupShm, mainShm)
     renameSync(backup, main)
-  } else if (existsSync(main) && !existsSync(mainWal) && existsSync(backupWal)) {
+  } else if (
+    opts?.allowHalfRestoredWal === true
+    && existsSync(main)
+    && !existsSync(mainWal)
+    && existsSync(backupWal)
+  ) {
     moveIfExists(backupWal, mainWal)
     moveIfExists(backupShm, mainShm)
   }
@@ -548,8 +558,8 @@ export function recoverKnowledgeDbDir(kbDir: string): boolean {
   const pending = wikiResetPendingPath(kbDir)
 
   if (existsSync(rebuild)) {
-    // 未提交分支（Step 2 从未成功）：先 WAL 后主库安全还原 `.bak*`（C-2）。
-    restoreBackupToMain(kbDir)
+    // 未提交分支（Step 2 从未成功）：先 WAL 后主库安全还原 `.bak*`（C-2），允许半还原 WAL 兜底。
+    restoreBackupToMain(kbDir, { allowHalfRestoredWal: true })
     removeStagingFiles(kbDir)
     removeBackups(kbDir)
     // I-3 修复：已过上次提交点的 `committed` pending 必须保留并续做；
@@ -563,7 +573,8 @@ export function recoverKnowledgeDbDir(kbDir: string): boolean {
     return false
   }
 
-  // C-2 安全网：即使 `.rebuild` 缺失，只要主库不在且 `.bak` 仍在（或残留 `.bak-wal`），先还原再清理。
+  // C-2 / N-1：已提交/常规分支仅在主文件缺失且 `.bak` 仍在时还原；主文件已就位时
+  // 绝不将旧库 `.bak-wal` 嫁接到新主库，只清扫残留 `.bak*` 与 `.rebuild-*`。
   restoreBackupToMain(kbDir)
   // M-3：顺带清扫可能残留的 `.rebuild-wal` / `.rebuild-shm`。
   removeStagingFiles(kbDir)
@@ -1378,6 +1389,13 @@ export function beginRebuildStaging(kbDir: string, existingLiveDb?: DatabaseSync
       throw new Error('knowledge index backup could not be restored before rebuild')
     }
     removeBackups(kbDir)
+  } else if (existsSync(main)) {
+    // N-1：若上次未提交重建残留半还原 `.bak-wal`，先恢复再读快照；若为上次已提交重建
+    // 清扫失败遗留的过期 `.bak*`，在新建 `.rebuild` 前先清扫，避免新 `.rebuild` 触发误嫁接。
+    if (existsSync(rebuildDbPath(kbDir))) {
+      restoreBackupToMain(kbDir, { allowHalfRestoredWal: true })
+    }
+    removeBackups(kbDir)
   }
   const snapshot = readRebuildSnapshot(kbDir, existingLiveDb)
   removeStagingFiles(kbDir)
@@ -1498,6 +1516,8 @@ function insertVanishedTombstones(state: StagingState): void {
 /** Step 1：旧主库与伴随 WAL/SHM 一并移为 `.bak*`（提交前回滚零数据损失）。 */
 function moveOldIndexToBackup(kbDir: string): void {
   const main = dbPath(kbDir)
+  // N-1：搬移当前主库前先清扫任何过期 `.bak*`，保证 `.bak` 与 `.bak-wal/.bak-shm` 必属同一次 Step 1。
+  if (existsSync(main)) removeBackups(kbDir)
   moveIfExists(main, `${main}${BACKUP_SUFFIX}`)
   moveIfExists(`${main}${WAL_SUFFIX}`, `${main}${BACKUP_SUFFIX}${WAL_SUFFIX}`)
   moveIfExists(`${main}${SHM_SUFFIX}`, `${main}${BACKUP_SUFFIX}${SHM_SUFFIX}`)
@@ -1505,7 +1525,8 @@ function moveOldIndexToBackup(kbDir: string): void {
 
 /** 提交前失败：先搬回 WAL/SHM 再把 `.bak` 搬回主库；未确认主库就位绝不删 `.bak*`（C-2）。 */
 function restoreOldIndex(kbDir: string, opts?: CommitRebuildOptions): boolean {
-  if (!restoreBackupToMain(kbDir, opts)) return false
+  const restoreOpts = opts === undefined ? { allowHalfRestoredWal: true } : { ...opts, allowHalfRestoredWal: true }
+  if (!restoreBackupToMain(kbDir, restoreOpts)) return false
   removeBackups(kbDir)
   return true
 }

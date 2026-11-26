@@ -82,6 +82,7 @@ export interface WalkSkippedEntry {
 export type SafeReadDirectorySkipReason =
   | 'symlink-outside-source'
   | 'symlink-loop'
+  | 'max-dirs-exceeded'
   | 'not-regular-file'
   | 'read-error'
 
@@ -100,6 +101,8 @@ export interface WalkSourceDirectoryOptions {
   readonly shouldIgnore?: (relPath: string, name: string, isDir: boolean) => boolean
   /** 取消钩子（I-2）：对账/重建失效时及早退出遍历，避免继续扫描磁盘。 */
   readonly shouldAbort?: () => boolean
+  /** 目录遍历硬上限（缺省 `MAX_WALKED_DIRS = 20_000`，允许测试注入小上限）。 */
+  readonly maxWalkedDirs?: number
 }
 
 export interface WalkSourceDirectoryResult {
@@ -451,6 +454,9 @@ export async function walkSourceDirectory(
     return { files, skipped: skippedEntries }
   }
 
+  const maxWalkedDirs = opts.maxWalkedDirs !== undefined && Number.isFinite(opts.maxWalkedDirs)
+    ? Math.max(0, Math.floor(opts.maxWalkedDirs))
+    : MAX_WALKED_DIRS
   let walkedDirs = 0
   const queue: Array<{
     readonly absPath: string
@@ -522,11 +528,15 @@ export async function walkSourceDirectory(
         }
         if (targetInfo.isDirectory()) {
           const key = dirKey(targetInfo)
-          if (dir.ancestors.has(key) || walkedDirs >= MAX_WALKED_DIRS) {
+          if (dir.ancestors.has(key)) {
             skippedEntries.push({ relPath, reason: 'symlink-loop' })
             continue
           }
           if (opts.shouldIgnore?.(relPath, name, true) === true) continue
+          if (walkedDirs >= maxWalkedDirs) {
+            skippedEntries.push({ relPath, reason: 'max-dirs-exceeded' })
+            continue
+          }
           walkedDirs += 1
           const nextAncestors = new Set(dir.ancestors)
           nextAncestors.add(key)
@@ -545,8 +555,12 @@ export async function walkSourceDirectory(
       if (info.isDirectory()) {
         if (opts.shouldIgnore?.(relPath, name, true) === true) continue
         const key = dirKey(info)
-        if (dir.ancestors.has(key) || walkedDirs >= MAX_WALKED_DIRS) {
+        if (dir.ancestors.has(key)) {
           skippedEntries.push({ relPath, reason: 'symlink-loop' })
+          continue
+        }
+        if (walkedDirs >= maxWalkedDirs) {
+          skippedEntries.push({ relPath, reason: 'max-dirs-exceeded' })
           continue
         }
         walkedDirs += 1
