@@ -112,7 +112,7 @@ function buildRecord(input: AppendKnowledgeEventInput): KnowledgeEventRecord {
   const detail = input.detail === undefined
     ? undefined
     : sanitizeText(input.detail, EVENT_DETAIL_MAX_BYTES)
-  const relPath = input.relPath === undefined ? undefined : maskSecrets(input.relPath)
+  const relPath = input.relPath === undefined ? undefined : sanitizeText(input.relPath, EVENT_DETAIL_MAX_BYTES)
   return {
     id: input.id ?? randomUUID(),
     at: input.at ?? new Date().toISOString(),

@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
 import { openVerifiedSourceFile, readAndHashHandle, walkSourceDirectory } from '../../src/huaanwork-host/knowledge/safe-read.ts'
 import { computeExtractConfigHash, extractFromBuffer, TEXT_EXTENSIONS } from '../../src/huaanwork-host/knowledge/extractors/index.ts'
 import {
@@ -216,5 +218,36 @@ describe('knowledge safe-read chain and document extractors', () => {
     const text = doc.sections.map(s => s.text).join('\n')
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(budget)
     expect(text).not.toContain('\uFFFD')
+  })
+
+  it('blocks @napi-rs/canvas in Extraction Worker & dev/test (I-1) and decodes Chinese CID PDF without inline ToUnicode (M-5)', async () => {
+    const pdfBytes = buildMinimalChineseCidPdf()
+    // M-5：样本不含内联 /ToUnicode，强制依赖 pdfjs 预定义 CMap（UniGB-UCS2-H + Adobe-GB1-UCS2）。
+    expect(pdfBytes.toString('latin1')).not.toContain('/ToUnicode')
+
+    const dir = mkdtempSync(join(tmpdir(), 'kb-pdf-no-canvas-'))
+    const pdfPath = join(dir, 'cid-only.pdf')
+    writeFileSync(pdfPath, pdfBytes)
+
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    try {
+      const extracted = await pool.extractFile('kb-pdf', {
+        sourceRoot: dir,
+        filePath: pdfPath,
+        relPath: 'cid-only.pdf',
+      })
+      expect(extracted.ok).toBe(true)
+      if (extracted.ok && extracted.hashOnly !== true) {
+        const text = extracted.doc.sections.map(s => s.text).join('')
+        expect(text).toContain('产品合规说明书')
+      }
+    } finally {
+      await pool.dispose()
+    }
+
+    // I-1：当前进程执行过 pdf-text 后，@napi-rs/canvas 解析被 registerHooks 拦截且未进入 require.cache。
+    const req = createRequire(import.meta.url)
+    expect(() => req('@napi-rs/canvas')).toThrow(/MODULE_NOT_FOUND|disabled/u)
+    expect(Object.keys(req.cache).filter(key => key.includes('@napi-rs/canvas'))).toEqual([])
   })
 })

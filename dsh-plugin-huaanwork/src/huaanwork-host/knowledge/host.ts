@@ -161,6 +161,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   let disposed = false
   let startPromise: Promise<void> | undefined
   let disposePromise: Promise<void> | undefined
+  /** `records` 变更代际号：用于 `update()` 前置无锁校验后的并发变更检测（M-9）。 */
+  let recordsVersion = 0
   /** 注册表写入串行化：任务执行时才快照 `records`，后一次写总带上前一次的内存变更。 */
   let registryChain: Promise<unknown> = Promise.resolve()
   /** create 串行化：限制检查与注册表写入不被并发 create 绕过/覆盖。 */
@@ -338,10 +340,11 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
     }
     const id = randomUUID()
+    // I-6：持久化 `validation.realSourceDir`，确保原符号链接删除后嵌套/重叠校验依然成立。
     const record: KnowledgeBaseRecord = {
       id,
       name: input.name,
-      sourceDir: input.sourceDir,
+      sourceDir: validation.realSourceDir,
       autoOrganize: input.autoOrganize ?? true,
       watchPaused: false,
       createdAt: new Date().toISOString(),
@@ -349,6 +352,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     const kbRoot = neutralKnowledgeRootPath(profileDir, id)
     await mkdir(kbRoot, { recursive: true, mode: 0o700 })
     records.set(id, record)
+    recordsVersion += 1
     statsCache.set(id, ZERO_STATS)
     try {
       await persistRegistry()
@@ -356,6 +360,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     } catch (error) {
       // 注册表与磁盘保持成对：启动失败时回滚记录与刚创建的中立目录。
       records.delete(id)
+      recordsVersion += 1
       statsCache.delete(id)
       await persistRegistry().catch(() => undefined)
       await rm(kbRoot, { recursive: true, force: true }).catch(() => undefined)
@@ -368,12 +373,31 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     kbId: string,
     patch: { name?: string; sourceDir?: string; autoOrganize?: boolean; watchPaused?: boolean },
   ): Promise<KnowledgeBaseRecord> {
-    const record = requireRecord(kbId)
+    const initialRecord = requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
     if (patch.name !== undefined && (typeof patch.name !== 'string' || patch.name.trim() === '')) {
       throw new KnowledgeSyncError('invalid-source-dir', 'knowledge base name must not be empty')
     }
+    // M-9 / 规格 §6.4(1)：重绑源目录的前置校验在占 `maintainingIds` 之前执行，
+    // 校验失败时完全零副作用，也不阻塞并发 `sync`。
+    let prevalidatedRealSourceDir: string | undefined
+    const versionBeforeValidate = recordsVersion
+    if (patch.sourceDir !== undefined && patch.sourceDir !== initialRecord.sourceDir) {
+      const validation = await validateSourceDir({
+        sourceDir: patch.sourceDir,
+        profileDir,
+        existing: [...records.values()],
+        ignoreKbId: kbId,
+      })
+      if (!validation.ok) {
+        throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
+      }
+      prevalidatedRealSourceDir = validation.realSourceDir
+    }
+    const record = requireRecord(kbId)
+    assertNotDeleting(kbId)
+    assertNotMaintaining(kbId)
     maintainingIds.add(kbId)
     try {
       let next: KnowledgeBaseRecord = record
@@ -382,17 +406,19 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       if (patch.name !== undefined) next = { ...next, name: patch.name }
       if (patch.autoOrganize !== undefined) next = { ...next, autoOrganize: patch.autoOrganize }
       if (patch.sourceDir !== undefined && patch.sourceDir !== next.sourceDir) {
-        const newSourceDir = patch.sourceDir
-        // 控制器终审裁决（单写者）：Host 是 `knowledge-bases.json` 的唯一写者。
-        // 1. 零副作用前置校验：失败时绝不关闭旧 Watcher、不写注册表、不动索引与 wiki。
-        const validation = await validateSourceDir({
-          sourceDir: newSourceDir,
-          profileDir,
-          existing: [...records.values()],
-          ignoreKbId: kbId,
-        })
-        if (!validation.ok) {
-          throw new KnowledgeSyncError('invalid-source-dir', validation.reason)
+        let canonicalSourceDir = prevalidatedRealSourceDir
+        // 若前置校验 await 期间其它库发生增删改，加锁后再复核一次杜绝 TOCTOU。
+        if (canonicalSourceDir === undefined || recordsVersion !== versionBeforeValidate) {
+          const recheck = await validateSourceDir({
+            sourceDir: patch.sourceDir,
+            profileDir,
+            existing: [...records.values()],
+            ignoreKbId: kbId,
+          })
+          if (!recheck.ok) {
+            throw new KnowledgeSyncError('invalid-source-dir', recheck.reason)
+          }
+          canonicalSourceDir = recheck.realSourceDir
         }
         // 若同时传入 `watchPaused: true`，先暂停监听再重绑，避免重绑期间短暂重启无用监听。
         let pausedBeforeRebind = false
@@ -401,20 +427,23 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
           pausedBeforeRebind = true
           next = { ...next, watchPaused: true }
         }
-        const rebound: KnowledgeBaseRecord = { ...next, sourceDir: newSourceDir }
+        // I-6：重绑同样持久化规范化 `realSourceDir`。
+        const rebound: KnowledgeBaseRecord = { ...next, sourceDir: canonicalSourceDir }
         // 2/3. 引擎取维护门闩 + 停机序列；Host 在收敛前经 registryChain 原子
         //      落盘并更新内存。落盘失败回滚内存并抛出，引擎用旧记录恢复运行态。
         //      落盘成功后的收敛失败由引擎吞掉：磁盘与内存都保持新 sourceDir，
         //      下次启动对账自愈（规格 §6.4 失败与中断恢复）。
         try {
-          await engine.rebindSourceDir(kbId, newSourceDir, validation.realSourceDir, async () => {
+          await engine.rebindSourceDir(kbId, canonicalSourceDir, canonicalSourceDir, async () => {
             const previous = records.get(kbId)
             records.set(kbId, rebound)
+            recordsVersion += 1
             try {
               await persistRegistry()
             } catch (error) {
               if (previous === undefined) records.delete(kbId)
               else records.set(kbId, previous)
+              recordsVersion += 1
               throw error
             }
           })
@@ -439,11 +468,13 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       if (next !== persistedNext) {
         const previous = records.get(kbId)
         records.set(kbId, next)
+        recordsVersion += 1
         try {
           await persistRegistry()
         } catch (error) {
           if (previous === undefined) records.delete(kbId)
           else records.set(kbId, previous)
+          recordsVersion += 1
           if (watchTransition === 'paused') await engine.resumeWatch(kbId).catch(() => undefined)
           else if (watchTransition === 'resumed') await engine.pauseWatch(kbId).catch(() => undefined)
           throw error
@@ -456,7 +487,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   async function remove(kbId: string): Promise<void> {
-    requireRecord(kbId)
+    const previousRecord = requireRecord(kbId)
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
     deletingIds.add(kbId)
@@ -474,9 +505,19 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       }
       // 严禁触碰 sourceDir：只删除本库的中立数据根。
       await rm(neutralKnowledgeRootPath(profileDir, kbId), { recursive: true, force: true })
+      const previousStats = statsCache.get(kbId)
       records.delete(kbId)
       statsCache.delete(kbId)
-      await persistRegistry()
+      recordsVersion += 1
+      try {
+        await persistRegistry()
+      } catch (error) {
+        // I-10：注册表写失败时恢复内存记录，允许调用方幂等重试 `remove(kbId)`，避免下次启动建出空库。
+        records.set(kbId, previousRecord)
+        if (previousStats !== undefined) statsCache.set(kbId, previousStats)
+        recordsVersion += 1
+        throw error
+      }
       if (removalHook !== undefined) {
         await removalHook(kbId)
       }

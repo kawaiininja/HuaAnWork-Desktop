@@ -299,7 +299,7 @@ describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', (
     await client.closeKb('kb-1')
     const t0 = performance.now()
     await client.dispose(900)
-    expect(performance.now() - t0).toBeLessThan(1_000)
+    expect(performance.now() - t0).toBeLessThan(900)
     rmSync(kbDir, { recursive: true, force: true })
   })
 
@@ -505,6 +505,120 @@ describe('knowledge SQLite storage, rebuild commit-point, and Storage Worker', (
       expect(getPendingOrganizeBatch(db, { nowMs: 999_999 }).docs.map(d => d.docId)).toEqual([docPartial.docId])
     } finally {
       db.close()
+      rmSync(kbDir, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves .bak and .rebuild on double rollback failure without creating an empty DB (C-2)', () => {
+    const kbDir = mkdtempSync(join(tmpdir(), 'kb-c2-double-fail-'))
+    try {
+      const opened = openKnowledgeDb(kbDir)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      upsertDocumentWithChunks(opened.db, {
+        relPath: 'precious.md', normPath: 'precious.md', sha256: 'sha-precious', size: 12, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '珍贵历史索引不可丢失')],
+      })
+      opened.db.close()
+
+      const staging = beginRebuildStaging(kbDir)
+      staging.upsert({
+        relPath: 'new.md', normPath: 'new.md', sha256: 'sha-new', size: 8, mtimeMs: 2,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '新内容')],
+      })
+
+      // Step 2 提交点失败 + restoreOldIndex 同时抛错：绝不能删掉 .rebuild/.bak，也不能新建空主库。
+      const res = commitRebuildStaging(kbDir, staging, {
+        failBeforeCommitPointForTest: () => { throw new Error('simulated step 2 rename EBUSY') },
+        failRestoreOldIndexForTest: () => { throw new Error('simulated restore .bak EBUSY') },
+      })
+      expect(res).toMatchObject({ ok: false, code: 'rebuild-failed' })
+      expect(existsSync(join(kbDir, 'index.sqlite'))).toBe(false)
+      expect(existsSync(join(kbDir, 'index.sqlite.bak'))).toBe(true)
+      expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(true)
+
+      // openCommittedKnowledgeDb 绝不能在主文件缺失时新建空库。
+      expect(openCommittedKnowledgeDb(kbDir)).toMatchObject({ ok: false, code: 'index-error' })
+      expect(existsSync(join(kbDir, 'index.sqlite'))).toBe(false)
+
+      // 下次启动 openKnowledgeDb 走恢复分支完整还回旧库数据。
+      const recovered = openKnowledgeDb(kbDir)
+      expect(recovered.ok).toBe(true)
+      if (recovered.ok) {
+        expect(searchFts(recovered.db, { kbId: 'k', kbName: 'K', query: '珍贵历史索引' })).toHaveLength(1)
+        expect(existsSync(join(kbDir, 'index.sqlite.bak'))).toBe(false)
+        expect(existsSync(join(kbDir, 'index.sqlite.rebuild'))).toBe(false)
+        recovered.db.close()
+      }
+    } finally {
+      rmSync(kbDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects missing targetOrdinal in getChunkWithWindow (I-8), resets non-empty wiki when wiki.stale exists (I-9), copies existing tombstones on normal rebuild (I-12), and clamps searchFts limit to 60 (M-7)', () => {
+    const kbDir = mkdtempSync(join(tmpdir(), 'kb-i8-i9-i12-m7-'))
+    try {
+      const opened = openKnowledgeDb(kbDir)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const doc = upsertDocumentWithChunks(opened.db, {
+        relPath: 'two-chunks.md', normPath: 'two-chunks.md', sha256: 'sha-2', size: 10, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '第一片 公共词条'), sampleChunk(1, '第二片 公共词条')],
+      })
+      // I-8：窗口为 3 时请求不存在的 ordinal=2 必须返回 chunk-missing，而非拿 ordinal=1 顶替 ok。
+      expect(getChunkWithWindow(opened.db, { docId: doc.docId, ordinal: 1, window: 3 }).status).toBe('ok')
+      expect(getChunkWithWindow(opened.db, { docId: doc.docId, ordinal: 2, window: 3 }).status).toBe('chunk-missing')
+
+      // M-7：插入 70 份命中文档，searchFts(limit=200) 钳制到 60。
+      for (let i = 0; i < 70; i += 1) {
+        upsertDocumentWithChunks(opened.db, {
+          relPath: `cap-${String(i).padStart(2, '0')}.md`, normPath: `cap-${String(i).padStart(2, '0')}.md`,
+          sha256: `sha-cap-${String(i)}`, size: 10, mtimeMs: i, format: 'md', extractMode: 'text',
+          extractConfigHash: 'c1', status: 'indexed', chunks: [sampleChunk(0, `限量检索公共词条 ${String(i)}`)],
+        })
+      }
+      expect(searchFts(opened.db, { kbId: 'k', kbName: 'K', query: '限量检索公共词条', limit: 200 })).toHaveLength(60)
+
+      // I-12：先删除一个带 Wiki 卡片的文档生成墓碑，再跑正常重建，原有墓碑必须保留在新库中。
+      const deletedDoc = upsertDocumentWithChunks(opened.db, {
+        relPath: 'deleted-before-rebuild.md', normPath: 'deleted-before-rebuild.md',
+        sha256: 'sha-del', size: 10, mtimeMs: 99, format: 'md', extractMode: 'text',
+        extractConfigHash: 'c1', status: 'indexed', chunks: [sampleChunk(0, '待删卡片文档')],
+      })
+      markOrganizedAtomic(opened.db, { docId: deletedDoc.docId, sha256: 'sha-del', wikiNotePath: `docs/${deletedDoc.docId}.md` })
+      deleteDocument(opened.db, 'deleted-before-rebuild.md')
+      opened.db.close()
+
+      const staging = beginRebuildStaging(kbDir)
+      staging.upsert({
+        relPath: 'two-chunks.md', normPath: 'two-chunks.md', sha256: 'sha-2', size: 10, mtimeMs: 1,
+        format: 'md', extractMode: 'text', extractConfigHash: 'c1', status: 'indexed',
+        chunks: [sampleChunk(0, '第一片 公共词条')],
+      })
+      expect(commitRebuildStaging(kbDir, staging)).toMatchObject({ ok: true })
+      const reopened = openKnowledgeDb(kbDir)
+      expect(reopened.ok).toBe(true)
+      if (reopened.ok) {
+        const batch = getPendingOrganizeBatch(reopened.db, { nowMs: Date.now() })
+        expect(batch.tombstones.some(t => t.docId === deletedDoc.docId && t.wikiNotePath === `docs/${deletedDoc.docId}.md`)).toBe(true)
+        reopened.db.close()
+      }
+
+      // I-9：当 wiki/ 非空且残留 wiki.stale 也存在时，retryPendingWikiReset 必须挪走 wiki/ 并清掉 pending。
+      mkdirSync(join(kbDir, 'wiki', 'docs'), { recursive: true })
+      writeFileSync(join(kbDir, 'wiki', 'docs', 'mismatched.md'), '# 失配旧卡片')
+      mkdirSync(join(kbDir, 'wiki.stale'), { recursive: true })
+      writeFileSync(join(kbDir, 'wiki.stale', 'old.md'), '# 上次残留 stale')
+      writeFileSync(join(kbDir, 'wiki-reset.pending'), '{"reason":"corrupt-rebuild"}\n')
+
+      expect(retryPendingWikiReset(kbDir)).toEqual({ ok: true })
+      expect(existsSync(join(kbDir, 'wiki-reset.pending'))).toBe(false)
+      expect(existsSync(join(kbDir, 'wiki', 'docs', 'mismatched.md'))).toBe(false)
+      expect(existsSync(join(kbDir, 'wiki.stale'))).toBe(false)
+    } finally {
       rmSync(kbDir, { recursive: true, force: true })
     }
   })

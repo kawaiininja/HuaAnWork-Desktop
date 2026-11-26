@@ -21,7 +21,7 @@
  * `import type`，相对导入保留 `.ts` 后缀。
  */
 
-import { createRequire } from 'node:module'
+import { createRequire, registerHooks } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -30,6 +30,33 @@ import type { ExtractedDocument, ExtractedSection } from '../types.ts'
 import { truncateToUtf8Bytes } from './text.ts'
 
 const require = createRequire(import.meta.url)
+
+let canvasHookInstalled = false
+
+/**
+ * 阻断 `pdfjs-dist` 在 Node 下无条件 `require('@napi-rs/canvas')`（D4 / I-1）：
+ * 生产安装包已通过 `build.files` 排除 `@napi-rs/canvas*`，此处使用 Node 官方
+ * `module.registerHooks` 确保开发态、Vitest 与可 `terminate()` 的 Extraction Worker
+ * 同样绝不加载该原生插件；`pdf.mjs` 对加载失败有内置降级，文字提取不受影响。
+ */
+export function blockOptionalCanvasAddon(): void {
+  if (canvasHookInstalled || typeof registerHooks !== 'function') return
+  canvasHookInstalled = true
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (
+        specifier === '@napi-rs/canvas'
+        || specifier.startsWith('@napi-rs/canvas/')
+        || specifier.startsWith('@napi-rs/canvas-')
+      ) {
+        const error = new Error(`@napi-rs/canvas is disabled in knowledge extraction (${specifier})`) as NodeJS.ErrnoException
+        error.code = 'MODULE_NOT_FOUND'
+        throw error
+      }
+      return nextResolve(specifier, context)
+    },
+  })
+}
 
 /** 文字页判定阈值：非空白字符少于该值视为需要视觉（规格 §6.3）。 */
 export const MIN_TEXT_PAGE_CHARS = 30
@@ -77,6 +104,7 @@ let pdfjsModulePromise: Promise<PdfJsModule> | undefined
  */
 async function loadPdfjs(): Promise<PdfJsModule> {
   if (pdfjsModulePromise === undefined) {
+    blockOptionalCanvasAddon()
     pdfjsModulePromise = (async () => {
       const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs') as unknown as PdfJsModule
       const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')

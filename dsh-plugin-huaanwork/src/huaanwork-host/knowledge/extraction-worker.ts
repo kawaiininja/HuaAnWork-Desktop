@@ -19,6 +19,7 @@ import { parentPort } from 'node:worker_threads'
 import { disableAsarArchiveView } from '../../asar-archive-policy.ts'
 import { chunkExtractedDocument } from './chunker.ts'
 import { extractFromBuffer } from './extractors/index.ts'
+import { blockOptionalCanvasAddon } from './extractors/pdf-text.ts'
 import { openVerifiedSourceFile, readAndHashHandle } from './safe-read.ts'
 import { MAX_FILE_BYTES } from './types.ts'
 import type {
@@ -30,6 +31,7 @@ import type {
 } from './extraction-pool.ts'
 
 disableAsarArchiveView(import.meta.url)
+blockOptionalCanvasAddon()
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

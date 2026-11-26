@@ -278,6 +278,7 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
       if (current === undefined) return
       worker = undefined
       const budget = Math.max(0, Math.trunc(budgetMs))
+      const deadline = performance.now() + budget
       let timer: NodeJS.Timeout | undefined
       const timeout = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, budget)
@@ -291,7 +292,22 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
         if (timer !== undefined) clearTimeout(timer)
       }
       failAll(new KnowledgeStorageError('knowledge storage client disposed'))
-      await current.terminate().catch(() => undefined)
+      // M-8：在总预算 `budgetMs` 内等待 `terminate()`；预算耗尽时仍立即发 `terminate()`，不超预算阻塞退场。
+      const terminating = current.terminate().catch(() => undefined)
+      const remaining = Math.max(0, Math.ceil(deadline - performance.now()))
+      if (remaining > 0) {
+        let termTimer: NodeJS.Timeout | undefined
+        try {
+          await Promise.race([
+            terminating,
+            new Promise<void>((resolve) => {
+              termTimer = setTimeout(resolve, remaining)
+            }),
+          ])
+        } finally {
+          if (termTimer !== undefined) clearTimeout(termTimer)
+        }
+      }
     },
   }
 }

@@ -69,8 +69,9 @@ export const KNOWLEDGE_DB_SCHEMA_VERSION = 1
 export const LIST_DOCS_DEFAULT_LIMIT = 50
 /** `listDocs` 硬上限（规格 §7.2）。 */
 export const LIST_DOCS_MAX_LIMIT = 200
-/** 单库检索候选池大小：单库内先取 Top-60，再交 Host 侧重排（规格 §7.2）。 */
+/** 单库检索候选池大小与硬上限：单库内先取 Top-60，再交 Host 侧重排（规格 §7.2）。 */
 export const SEARCH_FTS_DEFAULT_LIMIT = 60
+export const SEARCH_FTS_MAX_LIMIT = 60
 /** 一批整理最多 10 份文档或 80 KB 切片文本（规格 §8.2）。 */
 export const ORGANIZE_BATCH_MAX_DOCS = 10
 export const ORGANIZE_BATCH_MAX_BYTES = 80 * 1024
@@ -183,6 +184,8 @@ export interface RebuildStaging {
 export interface CommitRebuildOptions {
   /** Step 1 成功之后、Step 2 提交点之前抛出，模拟提交前重命名失败。 */
   readonly failBeforeCommitPointForTest?: () => void
+  /** 提交前回滚把 `.bak` 搬回 `index.sqlite` 之前抛出，模拟双失败（C-2 回归测试）。 */
+  readonly failRestoreOldIndexForTest?: () => void
   /** 提交点之后、清理暂存文件之前抛出，模拟 Windows 上删除 `.rebuild-wal` 失败。 */
   readonly afterCommitCleanupForTest?: () => void
   readonly afterCommitBeforeReopenForTest?: () => void
@@ -240,6 +243,7 @@ interface RebuildSnapshotDoc {
 interface RebuildSnapshot {
   readonly corruptRecovery: boolean
   readonly docs: ReadonlyMap<string, RebuildSnapshotDoc>
+  readonly tombstones: readonly OrganizeTombstoneRecord[]
 }
 
 /** 一次文档写入所需的全量文档级状态（调用方算出继承值）。 */
@@ -383,28 +387,45 @@ function clearWikiStale(kbDir: string): void {
   }
   for (const entry of entries) {
     if (entry === WIKI_STALE_DIRNAME || entry.startsWith(`${WIKI_STALE_DIRNAME}.`)) {
-      removeIfExists(join(kbDir, entry))
+      try {
+        removeIfExists(join(kbDir, entry))
+      } catch (error) {
+        // 清扫旧 stale 树是 best-effort 收尾（规格 §6.4），锁冲突绝不回滚状态或误判 index-error。
+        console.warn(`[knowledge] failed to remove stale wiki directory ${entry}: ${errorMessage(error)}`)
+      }
     }
   }
 }
 
 /**
- * Wiki 幂等重置（规格 §6.4 提交后收尾）：`wiki/` → `wiki.stale`、重建空
- * `wiki/`、删除 `wiki-reset.pending`，最后尽力删除 `wiki.stale`。任一步失败
- * 都返回 false 并保留 pending，调用方据此维持 `wiki-reset-pending`。
+ * Wiki 幂等重置（规格 §6.4 提交后收尾，I-9 加固）：
+ * 若 `wiki/` 非空，无论 `wiki.stale` 是否残留都先挪走（冲突时用 `wiki.stale.<uuid>`），
+ * 重建空 `wiki/` 落盘后再删除 `wiki-reset.pending`，最后 best-effort 清扫 `wiki.stale*`。
+ * 只有挪动/建空目录/删 pending 失败时才返回 false 并保留 pending。
  */
 function performWikiReset(kbDir: string): boolean {
   const wikiDir = join(kbDir, WIKI_DIRNAME)
   const staleDir = wikiStalePath(kbDir)
   try {
-    if (existsSync(wikiDir) && !existsSync(staleDir)) renameSync(wikiDir, staleDir)
+    if (existsSync(wikiDir)) {
+      let entries: string[]
+      try {
+        entries = readdirSync(wikiDir)
+      } catch {
+        entries = ['<unreadable>']
+      }
+      if (entries.length > 0) {
+        const target = existsSync(staleDir) ? `${staleDir}.${randomUUID()}` : staleDir
+        renameSync(wikiDir, target)
+      }
+    }
     mkdirSync(wikiDir, { recursive: true, mode: PRIVATE_DIR_MODE })
     removeIfExists(wikiResetPendingPath(kbDir))
-    clearWikiStale(kbDir)
-    return true
   } catch {
     return false
   }
+  clearWikiStale(kbDir)
+  return true
 }
 
 function ensureWikiResetPendingSync(kbDir: string): void {
@@ -482,6 +503,12 @@ export function recoverKnowledgeDbDir(kbDir: string): boolean {
     return false
   }
 
+  // C-2 安全网：即使 `.rebuild` 缺失，只要主库不在且 `.bak` 仍在，先还原 `.bak*` 再继续，绝不删掉唯一备份。
+  if (!existsSync(main) && existsSync(backup)) {
+    renameSync(backup, main)
+    moveIfExists(`${backup}${WAL_SUFFIX}`, `${main}${WAL_SUFFIX}`)
+    moveIfExists(`${backup}${SHM_SUFFIX}`, `${main}${SHM_SUFFIX}`)
+  }
   removeIfExists(backup)
   removeIfExists(`${backup}${WAL_SUFFIX}`)
   removeIfExists(`${backup}${SHM_SUFFIX}`)
@@ -538,6 +565,10 @@ export function openKnowledgeDb(kbDir: string): OpenKnowledgeDbResult {
  * 让「重试重置知识视图」失去幂等入口。
  */
 export function openCommittedKnowledgeDb(kbDir: string): OpenKnowledgeDbResult {
+  // C-2：主文件缺失时绝不经 `new DatabaseSync` 静默建出空库，保留 `.bak` / `.rebuild` 供下次恢复。
+  if (!existsSync(dbPath(kbDir))) {
+    return { ok: false, code: 'index-error', error: 'knowledge index file does not exist' }
+  }
   try {
     const db = openVerifiedConnection(kbDir, true)
     return { ok: true, db, wikiResetPending: existsSync(wikiResetPendingPath(kbDir)) }
@@ -817,7 +848,7 @@ export function listDocs(db: DatabaseSync, filter?: ListDocsFilter): ListDocsRes
 export function searchFts(db: DatabaseSync, query: SearchFtsQuery): readonly SingleKbCandidate[] {
   const match = buildSafeFtsQuery(query.query)
   if (match === '') return []
-  const limit = clampInteger(query.limit, SEARCH_FTS_DEFAULT_LIMIT, 1, LIST_DOCS_MAX_LIMIT)
+  const limit = clampInteger(query.limit, SEARCH_FTS_DEFAULT_LIMIT, 1, SEARCH_FTS_MAX_LIMIT)
   const rows = db.prepare(
     `SELECT c.chunk_id AS chunk_id, c.doc_id AS doc_id, c.ordinal AS ordinal,
             c.heading_path AS heading_path, c.locator_json AS locator_json, c.content AS content,
@@ -887,7 +918,10 @@ export function getChunkWithWindow(db: DatabaseSync, query: GetChunkWindowQuery)
     `SELECT chunk_id, ordinal, heading_path, locator_json, content
        FROM chunks WHERE doc_id = ? AND ordinal >= ? ORDER BY ordinal ASC LIMIT ?`,
   ).all(query.docId, start, window).map(chunkWindowItem)
-  if (chunks.length === 0) return { status: 'chunk-missing', kbId, docId: query.docId }
+  // I-8（规格 §9.1）：目标 ordinal 必须实际命中，不能用相邻切片顶替返回 ok。
+  if (!chunks.some(chunk => chunk.ordinal === targetOrdinal)) {
+    return { status: 'chunk-missing', kbId, docId: query.docId }
+  }
 
   return {
     status: 'ok',
@@ -1096,7 +1130,9 @@ interface StagingState {
   readonly kbDir: string
   readonly db: DatabaseSync
   readonly snapshot: ReadonlyMap<string, RebuildSnapshotDoc>
+  readonly tombstones: readonly OrganizeTombstoneRecord[]
   readonly relPaths: Set<string>
+  readonly insertedDocIds: Set<string>
   closed: boolean
   pendingWritten: boolean
 }
@@ -1104,12 +1140,13 @@ interface StagingState {
 const stagingStates = new WeakMap<RebuildStaging, StagingState>()
 
 /**
- * 从旧库只读抽取重建快照。旧库缺失视为「无旧映射」（正常新建）；旧库存在但
- * 打不开 / `quick_check` 失败则标记为损坏恢复重建。
+ * 从旧库只读抽取重建快照（含既有 `organize_tombstones`）。旧库缺失视为
+ * 「无旧映射」（正常新建）；旧库存在但打不开 / `quick_check` 失败则标记为
+ * 损坏恢复重建。
  */
 function readRebuildSnapshot(kbDir: string): RebuildSnapshot {
   const main = dbPath(kbDir)
-  if (!existsSync(main)) return { corruptRecovery: false, docs: new Map() }
+  if (!existsSync(main)) return { corruptRecovery: false, docs: new Map(), tombstones: [] }
   let db: DatabaseSync | undefined
   try {
     db = new DatabaseSync(main, { readOnly: true })
@@ -1124,9 +1161,18 @@ function readRebuildSnapshot(kbDir: string): RebuildSnapshot {
         organizedSha256: textOrNull(row['organized_sha256']),
       })
     }
-    return { corruptRecovery: false, docs }
+    // I-12：正常重建保留 `wiki/`，必须把旧库已存在的整理墓碑一并迁移到新库。
+    const tombstones: OrganizeTombstoneRecord[] = db.prepare(
+      'SELECT doc_id, rel_path, wiki_note_path, deleted_at FROM organize_tombstones',
+    ).all().map((row): OrganizeTombstoneRecord => ({
+      docId: text(row['doc_id']),
+      relPath: text(row['rel_path']),
+      wikiNotePath: textOrNull(row['wiki_note_path']),
+      deletedAt: integer(row['deleted_at']),
+    }))
+    return { corruptRecovery: false, docs, tombstones }
   } catch {
-    return { corruptRecovery: true, docs: new Map() }
+    return { corruptRecovery: true, docs: new Map(), tombstones: [] }
   } finally {
     if (db !== undefined) {
       try {
@@ -1194,7 +1240,9 @@ export function beginRebuildStaging(kbDir: string): RebuildStaging {
     kbDir,
     db,
     snapshot: snapshot.docs,
+    tombstones: snapshot.tombstones,
     relPaths: new Set<string>(),
+    insertedDocIds: new Set<string>(),
     closed: false,
     pendingWritten: false,
   }
@@ -1220,6 +1268,7 @@ export function beginRebuildStaging(kbDir: string): RebuildStaging {
       }
       const result = writeDocument(db, input, plan, MAX_CHUNKS_PER_KB)
       state.relPaths.add(input.relPath)
+      state.insertedDocIds.add(result.docId)
       return result
     },
     abort(): void {
@@ -1258,7 +1307,7 @@ export function abortRebuildStaging(kbDir: string, staging: RebuildStaging): voi
   stagingStates.delete(staging)
 }
 
-/** 快照里消失且带 Wiki 卡片的文档，写入新库 `organize_tombstones`。 */
+/** 复制旧库既有整理墓碑，并为快照里消失且带 Wiki 卡片的文档补写墓碑。 */
 function insertVanishedTombstones(state: StagingState): void {
   const now = Date.now()
   const insert = state.db.prepare(
@@ -1266,6 +1315,10 @@ function insertVanishedTombstones(state: StagingState): void {
      ON CONFLICT(doc_id) DO UPDATE SET rel_path = excluded.rel_path,
        wiki_note_path = excluded.wiki_note_path, deleted_at = excluded.deleted_at`,
   )
+  for (const existing of state.tombstones) {
+    if (state.insertedDocIds.has(existing.docId)) continue
+    insert.run(existing.docId, existing.relPath, existing.wikiNotePath, existing.deletedAt)
+  }
   for (const [relPath, doc] of state.snapshot) {
     if (state.relPaths.has(relPath)) continue
     if (doc.wikiNotePath === null) continue
@@ -1281,18 +1334,21 @@ function moveOldIndexToBackup(kbDir: string): void {
   moveIfExists(`${main}${SHM_SUFFIX}`, `${main}${BACKUP_SUFFIX}${SHM_SUFFIX}`)
 }
 
-/** 提交前失败：把 `.bak*` 搬回主库并清掉暂存文件。 */
-function restoreOldIndex(kbDir: string): void {
+/** 提交前失败：把 `.bak*` 搬回主库；返回主库是否已确认安全还原（未还原时绝不删 `.bak*`）。 */
+function restoreOldIndex(kbDir: string, opts?: CommitRebuildOptions): boolean {
   const main = dbPath(kbDir)
   const backup = `${main}${BACKUP_SUFFIX}`
   if (!existsSync(main) && existsSync(backup)) {
+    opts?.failRestoreOldIndexForTest?.()
     renameSync(backup, main)
     moveIfExists(`${backup}${WAL_SUFFIX}`, `${main}${WAL_SUFFIX}`)
     moveIfExists(`${backup}${SHM_SUFFIX}`, `${main}${SHM_SUFFIX}`)
   }
+  if (!existsSync(main) && existsSync(backup)) return false
   removeIfExists(backup)
   removeIfExists(`${backup}${WAL_SUFFIX}`)
   removeIfExists(`${backup}${SHM_SUFFIX}`)
+  return true
 }
 
 function removeBackups(kbDir: string): void {
@@ -1310,18 +1366,23 @@ function rebuildFailure(
 }
 
 /**
- * 提交前失败后的收尾：暂存状态必须释放（否则下一次 begin/commit 误判重建仍在
- * 进行），文件与 pending 清理尽力而为——清理再失败也绝不能把 `rebuild-failed`
- * 变成未编码异常。残留的 `.rebuild*` 由下一次 `beginRebuildStaging` 或启动恢复
- * 清理，残留的未提交 pending 由启动恢复的未提交分支清理。
+ * 提交前失败后的收尾：暂存状态与句柄必须释放（否则下一次 begin/commit 误判重建仍在
+ * 进行）；只有在确认旧主库已安全就位（`removeRecoveryMarkers = true`）时才删除
+ * `.rebuild*` 与未提交的 `wiki-reset.pending`。若双失败导致 `.bak` 尚未还原回主库，
+ * 必须保留 `.rebuild` 与 `.bak*`，确保下次启动恢复走未提交分支还原旧库（C-2）。
  */
-function discardStagingAfterFailure(state: StagingState, staging: RebuildStaging): void {
+function discardStagingAfterFailure(
+  state: StagingState,
+  staging: RebuildStaging,
+  removeRecoveryMarkers: boolean = true,
+): void {
   stagingStates.delete(staging)
   try {
     closeStaging(state)
   } catch {
     // 暂存连接已关闭或已损坏，忽略。
   }
+  if (!removeRecoveryMarkers) return
   try {
     removeStagingFiles(state.kbDir)
   } catch {
@@ -1342,7 +1403,7 @@ function discardStagingAfterFailure(state: StagingState, staging: RebuildStaging
  * 2. 损坏恢复重建在提交前落盘 `wiki-reset.pending`（`0o600`）；
  * 3. Step 1 把旧 `index.sqlite(-wal/-shm)` 移为 `.bak*`；
  * 4. Step 2 `rename(index.sqlite.rebuild, index.sqlite)` 是唯一提交点；
- * 5. 提交前任何失败都回滚旧库并返回 `rebuild-failed`；
+ * 5. 提交前任何失败都回滚旧库并返回 `rebuild-failed`（回滚也失败则保留 `.bak` 与 `.rebuild`）；
  * 6. 提交后：暂存清理只是尽力而为的警告（日志），Wiki 幂等重置 / 清理备份 /
  *    重开新库；重开失败绝不回滚旧库，返回 `index-error`。
  */
@@ -1364,7 +1425,7 @@ export function commitRebuildStaging(
       state.pendingWritten = true
     }
   } catch (error) {
-    discardStagingAfterFailure(state, staging)
+    discardStagingAfterFailure(state, staging, true)
     return rebuildFailure('rebuild-failed', error)
   }
 
@@ -1373,13 +1434,14 @@ export function commitRebuildStaging(
     opts?.failBeforeCommitPointForTest?.()
     renameSync(rebuildDbPath(kbDir), dbPath(kbDir))
   } catch (error) {
-    // 提交点之前的任何失败：回滚旧库与旧 `wiki/`，清理未提交的 pending。
+    // 提交点之前的任何失败：回滚旧库与旧 `wiki/`；仅在确认旧库还原后才清理 `.rebuild*` 与未提交 pending。
+    let restored = false
     try {
-      restoreOldIndex(kbDir)
+      restored = restoreOldIndex(kbDir, opts)
     } catch {
-      // 回滚尽力而为；失败时仍返回明确错误由 Host 记 rebuild_failed。
+      restored = false
     }
-    discardStagingAfterFailure(state, staging)
+    discardStagingAfterFailure(state, staging, restored)
     return rebuildFailure('rebuild-failed', error)
   }
 

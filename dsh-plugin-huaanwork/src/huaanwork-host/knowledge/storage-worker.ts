@@ -13,7 +13,7 @@
  * 相对导入保留 `.ts` 后缀。
  */
 
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import type { DatabaseSync } from 'node:sqlite'
 import { parentPort } from 'node:worker_threads'
 
@@ -235,16 +235,11 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
         openKbs.set(message.kbId, { db: reopened.db, kbDir: message.kbDir })
         return result
       }
-      if (result.code === 'rebuild-failed' && wasOpen) {
-        // 规格 §6.4 step 3：提交前失败已把旧库回滚到盘上，必须重新注册，
-        // 否则该库的后续操作全部报 `knowledge base … is not open`。
-        // 这里用不重跑启动恢复、也不消费 `wiki-reset.pending` 的打开方式：
-        // 回滚后的旧库就是提交时的盘上状态，再跑恢复会误清 Host 尚待重试的
-        // pending（与提交成功路径的选择一致）。
+      if (result.code === 'rebuild-failed' && wasOpen && existsSync(dbPath(message.kbDir))) {
+        // 规格 §6.4 step 3 / C-2：仅在旧库确实已回滚回盘上时才重新注册，绝不在主文件
+        // 缺失时经 `DatabaseSync` 新建空库；回滚未完成时保留 `.bak` 与 `.rebuild` 待下次恢复。
         const reopened = openCommittedKnowledgeDb(message.kbDir)
         if (reopened.ok) openKbs.set(message.kbId, { db: reopened.db, kbDir: message.kbDir })
-        // 重开失败（例如损坏恢复重建回滚后旧库依旧损坏）保持关闭，但仍按原
-        // 阶段返回 `rebuild-failed`，不得改报 `index-error`。
       }
       return result
     }

@@ -70,6 +70,19 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
     // Rebinding kb-a succeeds when ignoreKbId is set; overlapping a registered project dir is allowed (spec §5.2(4))
     await expect(validateSourceDir({ sourceDir: kbA, profileDir, existing, ignoreKbId: 'kb-a' })).resolves.toMatchObject({ ok: true })
     await expect(validateSourceDir({ sourceDir: projectDir, profileDir, existing })).resolves.toMatchObject({ ok: true })
+
+    // I-5（D11）：直接传入 UNC 字符串或符号链接指向 UNC/设备路径均必须拒绝。
+    await expect(validateSourceDir({ sourceDir: '\\\\server\\share\\docs', profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
+    await expect(validateSourceDir({ sourceDir: '//server/share/docs', profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
+    if (process.platform !== 'win32') {
+      const uncLinkPosix = join(root, 'link-unc-posix')
+      const uncLinkWin = join(root, 'link-unc-win')
+      symlinkSync('//server/share/docs', uncLinkPosix)
+      symlinkSync('\\\\?\\UNC\\server\\share\\docs', uncLinkWin)
+      await expect(validateSourceDir({ sourceDir: uncLinkPosix, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
+      await expect(validateSourceDir({ sourceDir: join(uncLinkPosix, 'nested'), profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
+      await expect(validateSourceDir({ sourceDir: uncLinkWin, profileDir, existing: [] })).resolves.toMatchObject({ ok: false })
+    }
   })
 
   it('writes knowledge-bases.json and settings.json atomically with 0o600 on POSIX', async () => {
@@ -152,9 +165,35 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
         chmodSync(roProfile, 0o700)
       }
     }
+    // M-3：缺失文件返回 []；畸形记录与非法 kbId 被丢弃，同文件中的合法记录保留。
+    const missingProfile = join(root, 'profile-missing')
+    mkdirSync(missingProfile, { recursive: true })
+    await expect(readKnowledgeBases(missingProfile)).resolves.toEqual([])
+
+    const mixedProfile = join(root, 'profile-mixed')
+    mkdirSync(mixedProfile, { recursive: true })
+    const validRecord = {
+      id: 'kb-valid',
+      name: '合法库',
+      sourceDir: validDocsDir,
+      autoOrganize: true,
+      watchPaused: false,
+      createdAt: '2026-11-26T00:00:00.000Z',
+    }
+    writeFileSync(
+      join(mixedProfile, 'knowledge-bases.json'),
+      JSON.stringify({
+        knowledgeBases: [
+          { ...validRecord, id: '../escape' },
+          { id: 'kb-bad', name: '', sourceDir: validDocsDir, autoOrganize: true, watchPaused: false, createdAt: '2026-11-26T00:00:00.000Z' },
+          validRecord,
+        ],
+      }),
+    )
+    await expect(readKnowledgeBases(mixedProfile)).resolves.toEqual([validRecord])
   })
 
-  it('probes directory case sensitivity without creating files and handles non-ASCII leaf names', async () => {
+  it('probes directory case sensitivity without creating files, agrees with actual volume semantics (M-3), and handles non-ASCII leaf names', async () => {
     const root = mkdtempSync(join(tmpdir(), 'kb-CaseProbe-'))
     const nonAsciiDir = join(root, '资料库')
     mkdirSync(nonAsciiDir, { recursive: true })
@@ -162,13 +201,21 @@ describe('knowledge registry, sourceDir validation, and worker path resolution',
     const beforeLeaf = readdirSync(nonAsciiDir)
     const res1 = await probeCaseSensitiveDir(root)
     const res2 = await probeCaseSensitiveDir(nonAsciiDir)
-    // Controller ruling: Linux is known case-sensitive; other platforms only assert a boolean.
-    if (process.platform === 'linux') {
-      expect(res1).toBe(true)
-    } else {
-      expect(typeof res1).toBe('boolean')
+    // 与测试独立创建的对照目录比对真实卷行为（兼顾 M-24 大小写敏感 APFS 与 M-3 击穿硬编码平台桩）。
+    const checkDir = mkdtempSync(join(tmpdir(), 'kb-case-oracle-'))
+    const lowerDir = join(checkDir, 'alpha')
+    const upperDir = join(checkDir, 'ALPHA')
+    mkdirSync(lowerDir)
+    let volumeIsCaseSensitive = true
+    try {
+      const sLower = statSync(lowerDir, { bigint: true })
+      const sUpper = statSync(upperDir, { bigint: true })
+      volumeIsCaseSensitive = !(sLower.dev === sUpper.dev && sLower.ino === sUpper.ino)
+    } catch {
+      volumeIsCaseSensitive = true
     }
-    expect(typeof res2).toBe('boolean')
+    expect(res1).toBe(volumeIsCaseSensitive)
+    expect(res2).toBe(volumeIsCaseSensitive)
     expect(readdirSync(root)).toEqual(beforeRoot)
     expect(readdirSync(nonAsciiDir)).toEqual(beforeLeaf)
   })

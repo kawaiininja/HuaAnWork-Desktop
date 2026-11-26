@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { Worker } from 'node:worker_threads'
 import { describe, expect, it, vi } from 'vitest'
 import { createKnowledgeHost } from '../../src/huaanwork-host/knowledge/host.ts'
 import { createExtractionPool } from '../../src/huaanwork-host/knowledge/extraction-pool.ts'
@@ -269,7 +270,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
   })
 
   it('host.update({ sourceDir }) is the single registry writer and preserves docId/wiki assets across a moved source dir', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'kb-host-rebind-')))
     const profileDir = join(root, 'profile')
     const sourceDir = join(root, 'docs')
     const movedDir = join(root, 'docs-moved')
@@ -310,7 +311,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
   })
 
   it('rejects an invalid rebind with invalid-source-dir and leaves both memory and knowledge-bases.json on the old source dir', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-invalid-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'kb-host-rebind-invalid-')))
     const profileDir = join(root, 'profile')
     const sourceDir = join(root, 'docs')
     mkdirSync(profileDir, { recursive: true })
@@ -336,7 +337,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
   })
 
   it('keeps the new sourceDir on disk and in memory when post-persist convergence fails (never reverts)', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-converge-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'kb-host-rebind-converge-')))
     const profileDir = join(root, 'profile')
     const sourceDir = join(root, 'docs')
     const movedDir = join(root, 'docs-moved')
@@ -392,23 +393,37 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
     writeFileSync(join(sourceDir, 'stuck.md'), '触发忙等')
 
     const realPool = createExtractionPool({ maxWorkers: 1, timeoutMs: 60_000 })
+    const originalTerminate = Worker.prototype.terminate
+    let terminateSettled = false
+    const terminateSpy = vi.spyOn(Worker.prototype, 'terminate').mockImplementation(function (this: Worker) {
+      return originalTerminate.call(this).then((code) => {
+        terminateSettled = true
+        return code
+      })
+    })
     const host = createKnowledgeHost({ profileDir, poolOverrideForTest: realPool })
     await host.start()
-    // Kick off a genuine CPU-blocking extraction inside the real Extraction Worker
-    const inFlight = realPool.extractFile('kb-stuck', {
-      sourceRoot: sourceDir,
-      filePath: join(sourceDir, 'stuck.md'),
-      relPath: 'stuck.md',
-      debugBusyLoopMs: 30_000,
-    })
-    await vi.waitFor(() => { expect(realPool.activeWorkerCount()).toBe(1) }, { timeout: 2_000 })
+    try {
+      // Kick off a genuine CPU-blocking extraction inside the real Extraction Worker
+      const inFlight = realPool.extractFile('kb-stuck', {
+        sourceRoot: sourceDir,
+        filePath: join(sourceDir, 'stuck.md'),
+        relPath: 'stuck.md',
+        debugBusyLoopMs: 30_000,
+      })
+      await vi.waitFor(() => { expect(realPool.activeWorkerCount()).toBe(1) }, { timeout: 2_000 })
 
-    const start = performance.now()
-    await host.dispose()
-    const elapsed = performance.now() - start
-    expect(elapsed).toBeLessThan(1_000)
-    expect(realPool.activeWorkerCount()).toBe(0)
-    await expect(inFlight).resolves.toMatchObject({ ok: false })
+      const start = performance.now()
+      await host.dispose()
+      const elapsed = performance.now() - start
+      expect(elapsed).toBeLessThan(1_000)
+      expect(realPool.activeWorkerCount()).toBe(0)
+      // M-6：断言负责忙等线程的 terminate() Promise 在 dispose 返回前已真正落定。
+      expect(terminateSettled).toBe(true)
+      await expect(inFlight).resolves.toMatchObject({ ok: false })
+    } finally {
+      terminateSpy.mockRestore()
+    }
   })
 
   it('defaults autoOrganize to true on create (spec §5.2/§9.3) while honouring explicit false', async () => {
@@ -440,7 +455,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
   })
 
   it('preserves wiki-reset-pending across host.update({ sourceDir }) until sync completes the reset (spec §6.4)', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'kb-host-rebind-pending-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'kb-host-rebind-pending-')))
     const profileDir = join(root, 'profile')
     const sourceDir = join(root, 'docs')
     const movedDir = join(root, 'docs-moved')
@@ -538,7 +553,7 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
   })
 
   it('handles combined { sourceDir, watchPaused: true } without restarting watcher and rolls back in-memory update on persist failure', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'kb-host-update-rollback-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'kb-host-update-rollback-')))
     const profileDir = join(root, 'profile')
     const sourceDir = join(root, 'docs')
     const movedDir = join(root, 'docs-moved')
@@ -572,6 +587,45 @@ describe('KnowledgeHost lifecycle, remove, rebuild, source recovery, limits, sta
       expect(host.isWatchingForTest(kb.id)).toBe(false)
       expect(host.get(kb.id)?.phase).toBe('watch-paused')
       expect(readRegistryRecords(profileDir).find(r => r.id === kb.id)).toMatchObject({ sourceDir: movedDir })
+    } finally {
+      await host.dispose()
+    }
+  })
+
+  it('persists canonical realSourceDir so overlap checks survive symlink removal (I-6) and rolls back remove() record on registry persist failure (I-10)', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'kb-host-i6-i10-')))
+    const profileDir = join(root, 'profile')
+    const realDocs = join(root, 'real-docs')
+    const nestedDocs = join(realDocs, 'nested')
+    const linkDocs = join(root, 'link-docs')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(nestedDocs, { recursive: true })
+    symlinkSync(realDocs, linkDocs, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const host = createKnowledgeHost({ profileDir })
+    await host.start()
+    try {
+      const kb = await host.create({ name: '符号链接库', sourceDir: linkDocs })
+      // I-6：注册表持久化规范化 realSourceDir，删除原符号链接后子目录仍被判重叠拒绝。
+      expect(kb.sourceDir).toBe(realDocs)
+      expect(readRegistryRecords(profileDir).find(r => r.id === kb.id)?.sourceDir).toBe(realDocs)
+      rmSync(linkDocs, { force: true })
+      await expect(host.create({ name: '嵌套子目录库', sourceDir: nestedDocs })).rejects.toThrow(/invalid-source-dir/u)
+
+      // I-10：remove() 删目录后写注册表失败时，内存记录必须回滚以支持幂等重试。
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        chmodSync(profileDir, 0o500)
+        try {
+          await expect(host.remove(kb.id)).rejects.toThrow()
+        } finally {
+          chmodSync(profileDir, 0o700)
+        }
+        expect(host.get(kb.id)?.id).toBe(kb.id)
+        // 权限恢复后再次调用 remove() 幂等成功，不再报 knowledge-base-not-found。
+        await host.remove(kb.id)
+        expect(host.get(kb.id)).toBeUndefined()
+        expect(readRegistryRecords(profileDir).some(r => r.id === kb.id)).toBe(false)
+      }
     } finally {
       await host.dispose()
     }

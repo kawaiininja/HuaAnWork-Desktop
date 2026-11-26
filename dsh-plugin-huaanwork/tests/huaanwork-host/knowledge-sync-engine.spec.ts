@@ -719,4 +719,223 @@ describe('knowledge Extraction Worker pool, cloud probe, and sync engine', () =>
       await storage.dispose(900)
     }
   })
+
+  it('blocks periodic reconcile and handleSystemResume during rebuildIndex (C-1) and cancels resume stagger on delete (I-4)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-c1-i4-'))
+    const profileDir = join(root, 'profile')
+    const source1 = join(root, 'src-1')
+    const source2 = join(root, 'src-2')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(source1, { recursive: true })
+    mkdirSync(source2, { recursive: true })
+    writeFileSync(join(source1, 'doc1.md'), '文档一正文')
+    writeFileSync(join(source2, 'doc2.md'), '文档二正文')
+
+    const storage = createKnowledgeStorageClient()
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    const realExtract = pool.extractFile.bind(pool)
+    let holdRebuild = false
+    let releaseRebuild!: () => void
+    let rebuildPaused!: () => void
+    const rebuildAtGate = new Promise<void>(resolve => { rebuildPaused = resolve })
+    const extractSpy = vi.spyOn(pool, 'extractFile').mockImplementation(async (id, req, signal) => {
+      if (holdRebuild && id === 'kb-1' && req.relPath === 'doc1.md') {
+        rebuildPaused()
+        await new Promise<void>(resolve => { releaseRebuild = resolve })
+      }
+      return realExtract(id, req, signal)
+    })
+    const watchCounts = new Map<string, number>()
+    const watchFactory = (dir: string) => {
+      watchCounts.set(dir, (watchCounts.get(dir) ?? 0) + 1)
+      return createFakeWatcher()
+    }
+    const upsertSpy = vi.spyOn(storage, 'upsertDocument')
+    const deleteSpy = vi.spyOn(storage, 'deleteDocument')
+
+    const engine = createKnowledgeSyncEngine({
+      profileDir,
+      storage,
+      pool,
+      debounceMs: 20,
+      writeStableMs: 10,
+      reconcileIntervalMs: 30,
+      watchFactory,
+    })
+    try {
+      await engine.startKb({ id: 'kb-1', name: 'K1', sourceDir: source1, autoOrganize: true, watchPaused: false, createdAt: '2026-11-26T00:00:00.000Z' })
+      await engine.startKb({ id: 'kb-2', name: 'K2', sourceDir: source2, autoOrganize: true, watchPaused: false, createdAt: '2026-11-26T00:00:00.000Z' })
+      await engine.syncNow('kb-1')
+      await engine.syncNow('kb-2')
+
+      // C-1：重建提取卡住期间触发周期定时器与休眠恢复，绝不向活库写 upsert/delete，也不重开 Watcher。
+      upsertSpy.mockClear()
+      deleteSpy.mockClear()
+      const watchesBeforeRebuild = watchCounts.get(source1) ?? 0
+      holdRebuild = true
+      const rebuilding = engine.rebuildIndex('kb-1')
+      await rebuildAtGate
+      writeFileSync(join(source1, 'extra.md'), '重建期间新增但不得并发入活库')
+      await new Promise<void>(resolve => { setTimeout(resolve, 80) })
+      await engine.handleSystemResume()
+
+      expect(upsertSpy.mock.calls.filter(call => call[0] === 'kb-1')).toHaveLength(0)
+      expect(deleteSpy.mock.calls.filter(call => call[0] === 'kb-1')).toHaveLength(0)
+      expect(watchCounts.get(source1)).toBe(watchesBeforeRebuild)
+      holdRebuild = false
+      releaseRebuild()
+      await rebuilding
+
+      // I-4：handleSystemResume 错峰期间删掉第二个库，其延迟回调必须被取消，不得重新 watch 或复活目录。
+      const watches2Before = watchCounts.get(source2) ?? 0
+      const resumePromise = engine.handleSystemResume()
+      await engine.shutdownKbForDelete('kb-2')
+      await resumePromise
+      await new Promise<void>(resolve => { setTimeout(resolve, 60) })
+      expect(watchCounts.get(source2)).toBe(watches2Before)
+      expect(engine.getState('kb-2')).toBeUndefined()
+    } finally {
+      extractSpy.mockRestore()
+      upsertSpy.mockRestore()
+      deleteSpy.mockRestore()
+      await engine.dispose()
+      await pool.dispose()
+      await storage.dispose(900)
+    }
+  })
+
+  it('probes cloud placeholder before 1:1 rename hash (I-2), stops write-stable debounce on pause (I-3), keeps over-cap indexed docs across rebuild (I-7), isolates worker-crashed (I-11), and preserves cloud_probe_unavailable across >5 fold and rebuild (I-13)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kb-sync-i2-i13-'))
+    const profileDir = join(root, 'profile')
+    const sourceDir = join(root, 'src')
+    mkdirSync(profileDir, { recursive: true })
+    mkdirSync(sourceDir, { recursive: true })
+    writeFileSync(join(sourceDir, 'b.md'), '初始文档 B')
+    writeFileSync(join(sourceDir, 'c.md'), '初始文档 C')
+
+    const kbId = 'kb-combo'
+    const storage = createKnowledgeStorageClient()
+    const pool = createExtractionPool({ maxWorkers: 1 })
+    const realExtract = pool.extractFile.bind(pool)
+    let cloudMode: 'normal' | 'dehydrated-renamed' | 'probe-unavailable' = 'normal'
+    let crashFile: string | null = null
+    let crashCalls = 0
+    const extractedPaths: string[] = []
+    const extractSpy = vi.spyOn(pool, 'extractFile').mockImplementation(async (id, req, signal) => {
+      extractedPaths.push(req.relPath)
+      if (crashFile !== null && req.relPath === crashFile) {
+        crashCalls += 1
+        return { ok: false, reason: 'worker-crashed' as const, error: 'simulated OOM crash' }
+      }
+      return realExtract(id, req, signal)
+    })
+    const fakeWatcher = createFakeWatcher()
+    const engine = createKnowledgeSyncEngine({
+      profileDir,
+      storage,
+      pool,
+      maxFilesPerKb: 2,
+      debounceMs: 10,
+      writeStableMs: 80,
+      reconcileIntervalMs: 300_000,
+      watchFactory: () => fakeWatcher,
+      detectCloudPlaceholder: (filePath) => {
+        if (cloudMode === 'dehydrated-renamed' && filePath.endsWith('b-cloud.md')) return 'dehydrated'
+        if (cloudMode === 'probe-unavailable') return 'probe-unavailable'
+        return 'local'
+      },
+    })
+    try {
+      await engine.startKb({ id: kbId, name: '组合回归', sourceDir, autoOrganize: true, watchPaused: true, createdAt: '2026-11-26T00:00:00.000Z' })
+      await engine.syncNow(kbId)
+      const cDoc = (await storage.listDocs(kbId)).docs.find(d => d.relPath === 'c.md')!
+      await storage.markOrganizedAtomic(kbId, cDoc.docId, cDoc.sha256, `docs/${cDoc.docId}.md`)
+      mkdirSync(join(neutralKnowledgeWikiRootPath(profileDir, kbId), 'docs'), { recursive: true })
+      writeFileSync(join(neutralKnowledgeWikiRootPath(profileDir, kbId), 'docs', `${cDoc.docId}.md`), '# C 卡片')
+
+      // I-7：新增排在前面的 a.md 后，已入库的 c.md 掉出 maxFilesPerKb(2)，重建时必须保留 c.md 且不写墓碑。
+      writeFileSync(join(sourceDir, 'a.md'), '字典序最前文档 A')
+      await engine.syncNow(kbId)
+      expect((await storage.listDocs(kbId)).docs.map(d => d.relPath).sort()).toEqual(['a.md', 'b.md', 'c.md'])
+      await engine.rebuildIndex(kbId)
+      const afterRebuild = (await storage.listDocs(kbId)).docs
+      expect(afterRebuild.map(d => d.relPath).sort()).toEqual(['a.md', 'b.md', 'c.md'])
+      expect(afterRebuild.find(d => d.relPath === 'c.md')?.docId).toBe(cDoc.docId)
+      expect((await storage.getPendingOrganizeBatch(kbId, Date.now())).tombstones).toEqual([])
+
+      // I-2：1:1 重命名目标为未水合云占位文件时，不得先调 extractFile 打开内容。
+      cloudMode = 'dehydrated-renamed'
+      extractedPaths.length = 0
+      renameSync(join(sourceDir, 'b.md'), join(sourceDir, 'b-cloud.md'))
+      await engine.syncNow(kbId)
+      expect(extractedPaths).not.toContain('b-cloud.md')
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === 'b-cloud.md')).toMatchObject({
+        status: 'skipped',
+        statusReason: 'cloud-placeholder-dehydrated',
+      })
+      renameSync(join(sourceDir, 'b-cloud.md'), join(sourceDir, 'b.md'))
+      cloudMode = 'normal'
+      await engine.syncNow(kbId)
+
+      // I-11：worker-crashed 必须落 error 行并在未修改时不反复打崩 Worker。
+      crashFile = 'a.md'
+      writeFileSync(join(sourceDir, 'a.md'), '触发 OOM 崩溃内容')
+      const future = new Date(Date.now() + 60_000)
+      utimesSync(join(sourceDir, 'a.md'), future, future)
+      await engine.syncNow(kbId)
+      expect(crashCalls).toBe(1)
+      expect((await storage.listDocs(kbId)).docs.find(d => d.relPath === 'a.md')).toMatchObject({
+        status: 'error',
+        statusReason: 'worker-crashed',
+      })
+      await engine.syncNow(kbId)
+      expect(crashCalls).toBe(1)
+      crashFile = null
+
+      // I-3：写稳等待期间调用 pauseWatch，不得把写稳期间的新文件继续入库。
+      await engine.resumeWatch(kbId)
+      writeFileSync(join(sourceDir, '00-during-pause.md'), '写稳期间暂停不得入库')
+      fakeWatcher.emitChange('00-during-pause.md')
+      await new Promise<void>(resolve => { setTimeout(resolve, 25) })
+      await engine.pauseWatch(kbId)
+      expect((await storage.listDocs(kbId)).docs.some(d => d.relPath === '00-during-pause.md')).toBe(false)
+    } finally {
+      extractSpy.mockRestore()
+      await engine.dispose()
+      await pool.dispose()
+      await storage.dispose(900)
+    }
+
+    // I-13：>5 文件批量折叠与 rebuildIndex 都必须保留 cloud_probe_unavailable info 事件。
+    const sourceBatch = join(root, 'src-batch')
+    mkdirSync(sourceBatch, { recursive: true })
+    for (let i = 0; i < 7; i += 1) writeFileSync(join(sourceBatch, `f-${String(i)}.md`), `大批量文档 ${String(i)}`)
+    const storage2 = createKnowledgeStorageClient()
+    const pool2 = createExtractionPool({ maxWorkers: 1 })
+    const engine2 = createKnowledgeSyncEngine({
+      profileDir,
+      storage: storage2,
+      pool: pool2,
+      debounceMs: 20,
+      writeStableMs: 10,
+      reconcileIntervalMs: 300_000,
+      detectCloudPlaceholder: () => 'probe-unavailable',
+    })
+    try {
+      await engine2.startKb({ id: 'kb-fold', name: '折叠库', sourceDir: sourceBatch, autoOrganize: true, watchPaused: true, createdAt: '2026-11-26T00:00:00.000Z' })
+      await engine2.syncNow('kb-fold')
+      const foldEvents = await readKnowledgeEvents(neutralKnowledgeRootPath(profileDir, 'kb-fold'))
+      expect(foldEvents.some(e => e.kind === 'sync_completed' && (e.count ?? 0) === 7)).toBe(true)
+      expect(foldEvents.some(e => e.kind === 'cloud_probe_unavailable' && e.level === 'info')).toBe(true)
+
+      await engine2.startKb({ id: 'kb-rb-probe', name: '重建探针库', sourceDir: sourceBatch, autoOrganize: true, watchPaused: true, createdAt: '2026-11-26T00:00:00.000Z' })
+      await engine2.rebuildIndex('kb-rb-probe')
+      const rbEvents = await readKnowledgeEvents(neutralKnowledgeRootPath(profileDir, 'kb-rb-probe'))
+      expect(rbEvents.some(e => e.kind === 'cloud_probe_unavailable' && e.level === 'info')).toBe(true)
+    } finally {
+      await engine2.dispose()
+      await pool2.dispose()
+      await storage2.dispose(900)
+    }
+  })
 })

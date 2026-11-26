@@ -6,7 +6,7 @@
  */
 
 import { R_OK } from 'node:constants'
-import { access, lstat, realpath, stat } from 'node:fs/promises'
+import { access, lstat, readlink, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import type { KnowledgeBaseRecord } from './types.ts'
@@ -31,6 +31,58 @@ export type ValidateSourceDirResult =
  */
 export function isUncOrDevicePath(rawPath: string): boolean {
   return /^\\\\/u.test(rawPath) || /^\/\//u.test(rawPath)
+}
+
+/**
+ * 校验 `readlink` / `realpath` 产出的目标是否为 UNC 共享或设备路径（D11 / I-5）。
+ * Windows 上 libuv / junction 返回的本地扩展盘符路径 `\\?\C:\...` 允许剥离该前缀，
+ * 而 `\\?\UNC\...`、`\\.\...`、`\\server\...`、`//server/...` 一律拒绝。
+ */
+function isUncOrDeviceTarget(candidate: string): boolean {
+  if (/^\\\\\?\\UNC\\/iu.test(candidate)) return true
+  if (/^\\\\\.\\/u.test(candidate)) return true
+  if (/^\/\//u.test(candidate)) return true
+  if (/^\\\\/u.test(candidate) && !/^\\\\\?\\[A-Za-z]:[\\/]/u.test(candidate)) return true
+  return false
+}
+
+function normalizeResolvedLocalPath(candidate: string): string | null {
+  if (isUncOrDeviceTarget(candidate)) return null
+  if (/^\\\\\?\\[A-Za-z]:[\\/]/u.test(candidate)) return candidate.slice(4)
+  return candidate
+}
+
+const MAX_SYMLINK_INSPECT_HOPS = 16
+
+/**
+ * 在 `realpath()` 之前检查源路径与祖先段中的符号链接 / Windows junction：
+ * 若任一跳 `readlink()` 目标指向 UNC 共享或设备路径，立即拒绝，避免 `realpath()`
+ * 提前触发对外共享凭据协商（I-5 / D11）。
+ */
+async function hasUncSymlinkTarget(rawPath: string, depth: number = 0): Promise<boolean> {
+  if (depth >= MAX_SYMLINK_INSPECT_HOPS) return false
+  let current = resolve(rawPath)
+  for (;;) {
+    try {
+      const info = await lstat(current)
+      if (info.isSymbolicLink()) {
+        const target = await readlink(current)
+        if (isUncOrDeviceTarget(target)) return true
+        const normalizedTarget = normalizeResolvedLocalPath(target)
+        if (normalizedTarget === null) return true
+        const nextHop = isAbsolute(normalizedTarget)
+          ? normalizedTarget
+          : resolve(dirname(current), normalizedTarget)
+        if (nextHop !== current && await hasUncSymlinkTarget(nextHop, depth + 1)) return true
+      }
+    } catch {
+      // 缺失或不可读段留给后续 `realpath` / `stat` 报告标准错误。
+    }
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  return false
 }
 
 function errorMessage(error: unknown): string {
@@ -130,10 +182,18 @@ async function validateSourceDirInner(input: ValidateSourceDirInput): Promise<Va
   if (isUncOrDevicePath(rawSourceDir)) {
     return invalid('sourceDir 不能是 UNC 共享或 Windows 设备路径')
   }
+  if (await hasUncSymlinkTarget(rawSourceDir)) {
+    return invalid('sourceDir 符号链接目标不能是 UNC 共享或 Windows 设备路径')
+  }
 
   let realSourceDir: string
   try {
-    realSourceDir = await realpath(rawSourceDir)
+    const resolved = await realpath(rawSourceDir)
+    const normalized = normalizeResolvedLocalPath(resolved)
+    if (normalized === null) {
+      return invalid('sourceDir 规范化路径不能是 UNC 共享或 Windows 设备路径')
+    }
+    realSourceDir = normalized
     const info = await stat(realSourceDir)
     if (!info.isDirectory()) return invalid('sourceDir 不是目录')
     await access(realSourceDir, R_OK)
