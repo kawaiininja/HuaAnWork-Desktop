@@ -551,6 +551,9 @@ describe('published package surface', () => {
     expect(config).toContain("diagnostics: 'src/diagnostics.ts'")
     expect(config).toContain("notifications: 'src/notifications.ts'")
     expect(config).toContain("'diagnostic-export-worker': 'src/diagnostic-export-worker.ts'")
+    // M1-1：两个知识库 Worker 入口必须进入构建产物（Host 只以 URL 拉起，不经 exports map）。
+    expect(config).toContain("'huaanwork-host/knowledge/storage-worker': 'src/huaanwork-host/knowledge/storage-worker.ts'")
+    expect(config).toContain("'huaanwork-host/knowledge/extraction-worker': 'src/huaanwork-host/knowledge/extraction-worker.ts'")
     expect(config).toContain("preload: 'src/preload.ts', 'compatibility-preload': 'src/compatibility-preload.ts'")
     expect(config).toContain("entryFileNames: '[name].cjs'")
     expect(config).toContain("terminal: 'src/terminal.ts'")
@@ -934,6 +937,8 @@ describe('published package surface', () => {
       'skills/**',
       '!node_modules/node-pty/build/**',
       '!node_modules/fs-ext/build/**',
+      '!**/node_modules/@napi-rs/canvas/**',
+      '!**/node_modules/@napi-rs/canvas-*/**',
     ])
     expect(manifest.build?.mac?.icon).toBe('build/app-icon-mac.png')
     expect(manifest.build?.mac?.artifactName).toBe('HuaAnWork-${version}-${arch}.${ext}')

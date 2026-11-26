@@ -86,6 +86,21 @@ export function autoProjectRootPath(profileDir: string, projectId: string): stri
   return join(profileDir, 'workspace-projects', assertSafePathSegment(projectId, 'projectId'))
 }
 
+/** 知识库中立数据根目录父容器：<profileDir>/workspace-knowledge（纯路径，不创建目录）。 */
+export function neutralKnowledgeBaseDir(profileDir: string): string {
+  return join(profileDir, 'workspace-knowledge')
+}
+
+/** 单个知识库的中立数据根：<profileDir>/workspace-knowledge/<kbId>（纯路径，不创建目录）。 */
+export function neutralKnowledgeRootPath(profileDir: string, kbId: string): string {
+  return join(neutralKnowledgeBaseDir(profileDir), assertSafePathSegment(kbId, 'kbId'))
+}
+
+/** 单个知识库 Wiki 根：<profileDir>/workspace-knowledge/<kbId>/wiki（纯路径，不创建目录）。 */
+export function neutralKnowledgeWikiRootPath(profileDir: string, kbId: string): string {
+  return join(neutralKnowledgeRootPath(profileDir, kbId), 'wiki')
+}
+
 /** 存量未绑定自动化根目录父容器：<profileDir>/workspace-automations */
 export function neutralAutomationsBaseDir(profileDir: string): string {
   return join(profileDir, 'workspace-automations')

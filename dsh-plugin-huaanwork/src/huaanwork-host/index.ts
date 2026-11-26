@@ -2,7 +2,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { narrowArtifactNativeCapability, type ConfirmedRestartRuntime } from '../host-runtime-bridge.ts'
+import { narrowArtifactNativeCapability, type ConfirmedRestartRuntime, type SystemResumeRuntime } from '../host-runtime-bridge.ts'
 import { sweepLegacyChatAutoSessions } from './automation-sweep.ts'
 import { createHuaanworkEventHub, HUAANWORK_EVENTS_PATH } from './events.ts'
 import { installHuaanworkHolders } from './holders.ts'
@@ -46,7 +46,8 @@ import { createSkillCreationHost, setSkillCreationHost } from './skill-creation.
 import { readHuaanworkSettingsSync } from './settings.ts'
 import { configureSkillCatalog } from './skill-catalog-client.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
-import { clearPendingWorkspaceRoot, neutralAutomationsBaseDir, neutralSessionsBaseDir, neutralWorkspaceRoot } from './workspace-state.ts'
+import { clearPendingWorkspaceRoot, neutralAutomationsBaseDir, neutralKnowledgeBaseDir, neutralSessionsBaseDir, neutralWorkspaceRoot } from './workspace-state.ts'
+import { createKnowledgeHost } from './knowledge/host.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
 import {
   registerAgentPackageCreationTools,
@@ -271,6 +272,9 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         neutralWorkspaceRoot(config.profileDir),
         neutralSessionsBaseDir(config.profileDir),
         neutralAutomationsBaseDir(config.profileDir),
+        // M1-1：知识库中立根是 wiki/整理会话的 cwd 归属地；登记项目根可能是它的
+        // 祖先（profileDir 之上），前缀比较会误命中——规格 §1.3 要求永不清扫。
+        neutralKnowledgeBaseDir(config.profileDir),
       ],
     )
     if (sweptProjectLegacy.ran && (sweptProjectLegacy.removed > 0 || sweptProjectLegacy.skipped > 0)) {
@@ -286,6 +290,42 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
       disabled: config.automationScheduler?.disabled === true,
     })
   }, 'huaanwork: automation scheduler')
+  // M1-1 知识库宿主：顶层独立 effect（绝不放进 tools effect）。0 库启动只读注册表；
+  // 系统休眠恢复经窄接口可选订阅，退场 disposer 先取消订阅、再 ≤1s 并行退场。
+  // 生产接线必须自己 start（不依赖任何测试调用）。
+  ctx.effect(() => {
+    const knowledgeHost = createKnowledgeHost({ profileDir: config.profileDir })
+    void knowledgeHost.start().catch((cause: unknown) => {
+      routeCtx.logger(
+        `[knowledge] host start failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      )
+    })
+    const desktopRuntime = ctx.desktopRuntime as SystemResumeRuntime | undefined
+    let unsubscribeSystemResume: (() => void) | undefined
+    if (typeof desktopRuntime?.subscribeSystemResume === 'function') {
+      try {
+        const release = desktopRuntime.subscribeSystemResume(() => {
+          void knowledgeHost.handleSystemResume().catch((cause: unknown) => {
+            routeCtx.logger(
+              `[knowledge] system resume failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            )
+          })
+        })
+        if (typeof release === 'function') unsubscribeSystemResume = release
+      } catch (cause) {
+        routeCtx.logger(
+          `[knowledge] system resume subscription failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        )
+      }
+    }
+    return async () => {
+      try {
+        unsubscribeSystemResume?.()
+      } finally {
+        await knowledgeHost.dispose()
+      }
+    }
+  }, 'huaanwork: knowledge host')
   // 智能体目录真实接线(Task 10):fetch 公用机目录 + 本地 endpoints,存储根 = profileDir;
   // 目录快照同步进 huaanworkAgentCatalog holder(agent-invoke 的 @agent 分发消费)。
   // P1 修复(2026-10-14,A4-1 证据 §二):目录变更时同步重注册 call_host_tool,

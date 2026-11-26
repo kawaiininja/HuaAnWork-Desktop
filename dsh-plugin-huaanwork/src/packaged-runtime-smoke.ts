@@ -3,8 +3,10 @@
 import { execFileSync } from 'node:child_process'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -19,6 +21,10 @@ import { rgPath } from '@vscode/ripgrep'
 import AdmZip from 'adm-zip'
 import { exportDiagnosticsZip } from './diagnostic-export.ts'
 import { installProfilePackageResolver } from './module-resolution.ts'
+import { createExtractionPool } from './huaanwork-host/knowledge/extraction-pool.ts'
+import { buildMinimalChineseCidPdf } from './huaanwork-host/knowledge/pdf-fixture.ts'
+import { createKnowledgeStorageClient } from './huaanwork-host/knowledge/storage-client.ts'
+import { resolveKnowledgeWorkerUrl } from './huaanwork-host/knowledge/worker-paths.ts'
 
 const OK_MARKER = 'DSH_PACKAGED_RUNTIME_OK'
 
@@ -118,6 +124,213 @@ async function smokeDiagnosticExportWorker(): Promise<void> {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+}
+
+/**
+ * M1-1 packaged knowledge smoke（控制器裁决 I-2 / M-11）。
+ *
+ * 断言打包根内 pdfjs `cmaps/` 与 `standard_fonts/` 存在、可选原生依赖
+ * `@napi-rs/canvas*` 已从安装包排除（`pdfjs-dist` 纯文本提取不需要它，保留会
+ * 增大 ~60 MB 且破坏 macOS universal 合并），再经 `resolveKnowledgeWorkerUrl`
+ * 拉起**构建产物** `lib/huaanwork-host/knowledge/{storage,extraction}-worker.js`：
+ * 提取损坏 `.asar` 与最小中文 CID PDF、FTS5 入库并检索命中中文字符，最后断言
+ * 两个 Worker 的 `dispose()` < 1,000 ms。包体积/文件数是观察值（写到 stderr，
+ * 绝不进入 stdout 的 OK 标记）。
+ */
+export async function smokeKnowledgeWorkers(): Promise<void> {
+  const installRoot = fileURLToPath(new URL('./', installAnchor))
+  const pdfPackageRoot = join(installRoot, 'node_modules', 'pdfjs-dist')
+  const cmapsDir = join(pdfPackageRoot, 'cmaps')
+  const standardFontsDir = join(pdfPackageRoot, 'standard_fonts')
+  assert(
+    existsSync(cmapsDir) && readdirSync(cmapsDir).length > 0,
+    'is missing non-empty node_modules/pdfjs-dist/cmaps for Chinese CID PDF extraction',
+  )
+  assert(
+    existsSync(standardFontsDir) && readdirSync(standardFontsDir).length > 0,
+    'is missing non-empty node_modules/pdfjs-dist/standard_fonts for PDF text extraction',
+  )
+  const leakedCanvasPaths = findLeakedCanvasPackages(join(installRoot, 'node_modules'))
+  assert(
+    leakedCanvasPaths.length === 0,
+    `packaged app unexpectedly shipped @napi-rs/canvas* entries: ${leakedCanvasPaths.join(', ')}`,
+  )
+
+  const root = mkdtempSync(join(tmpdir(), 'dsh-packaged-knowledge-'))
+  const sourceDir = join(root, 'source')
+  const kbDir = join(root, 'kb')
+  mkdirSync(sourceDir, { recursive: true })
+  mkdirSync(kbDir, { recursive: true })
+  writeFileSync(join(sourceDir, 'corrupt.asar'), 'NOT_AN_ASAR_ARCHIVE')
+  writeFileSync(join(sourceDir, 'compliance.pdf'), buildMinimalChineseCidPdf())
+
+  const storage = createKnowledgeStorageClient({ workerUrl: resolveKnowledgeWorkerUrl('storage-worker') })
+  const pool = createExtractionPool({
+    maxWorkers: 1,
+    workerUrl: resolveKnowledgeWorkerUrl('extraction-worker'),
+  })
+  let disposeMs = 0
+  let disposeResults: PromiseSettledResult<void>[] = []
+  try {
+    const opened = await storage.openKb('packaged-smoke', kbDir)
+    assert(opened.ok, `could not open the packaged knowledge index: ${opened.ok ? '' : opened.error}`)
+
+    let chineseText = ''
+    for (const relPath of ['corrupt.asar', 'compliance.pdf']) {
+      const extracted = await pool.extractFile('packaged-smoke', {
+        sourceRoot: sourceDir,
+        filePath: join(sourceDir, relPath),
+        relPath,
+      })
+      assert(
+        extracted.ok,
+        `knowledge extraction failed for ${relPath}: ${extracted.ok ? '' : extracted.reason}`,
+      )
+      if (!extracted.ok || extracted.hashOnly === true) continue
+      if (relPath.endsWith('.pdf')) {
+        chineseText = extracted.doc.sections.map(section => section.text).join('')
+      }
+      await storage.upsertDocument('packaged-smoke', {
+        relPath,
+        normPath: relPath,
+        sha256: extracted.sha256,
+        size: extracted.size,
+        mtimeMs: extracted.mtimeMs,
+        format: extracted.doc.format,
+        extractMode: extracted.doc.extractMode,
+        extractConfigHash: extracted.doc.extractConfigHash,
+        status: extracted.doc.status,
+        ...(extracted.doc.statusReason === undefined ? {} : { statusReason: extracted.doc.statusReason }),
+        chunks: extracted.chunks,
+      })
+    }
+    assert(
+      /\p{Script=Han}{2,}/u.test(chineseText) && chineseText.includes('合规'),
+      `packaged PDF extraction lost the expected Chinese characters: ${JSON.stringify(chineseText.slice(0, 80))}`,
+    )
+    const hanRun = chineseText.match(/\p{Script=Han}{2,}/u)?.[0] ?? '合规'
+    const hits = await storage.searchFts('packaged-smoke', '打包冒烟库', hanRun.slice(0, 4), 10)
+    assert(hits.length > 0, `packaged knowledge FTS5 search missed ${JSON.stringify(hanRun.slice(0, 4))}`)
+    assert(
+      hits.some(hit => hit.content.includes(hanRun.slice(0, 2))),
+      'packaged knowledge FTS5 hit did not contain the expected Chinese characters',
+    )
+  } finally {
+    const disposeStart = performance.now()
+    disposeResults = await Promise.allSettled([storage.dispose(), pool.dispose()])
+    disposeMs = performance.now() - disposeStart
+    rmSync(root, { recursive: true, force: true })
+  }
+  const disposeFailures = disposeResults
+    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    .map(result => String(result.reason))
+  assert(
+    disposeFailures.length === 0,
+    `knowledge workers dispose rejected: ${disposeFailures.join('; ')}`,
+  )
+  assert(
+    disposeMs < 1_000,
+    `knowledge workers dispose took ${disposeMs.toFixed(1)} ms (budget 1,000 ms)`,
+  )
+
+  try {
+    const measured = measurePackagedTree(installRoot)
+    process.stderr.write(
+      `[knowledge-smoke] package files=${String(measured.files)} bytes=${String(measured.bytes)} `
+      + `canvasBytes=0 disposeMs=${disposeMs.toFixed(1)}\n`,
+    )
+  } catch (error) {
+    // 体积观察绝不影响冒烟结论。
+    process.stderr.write(`[knowledge-smoke] package measurement skipped: ${String(error)}\n`)
+  }
+}
+
+/** 递归排查安装目录全部 `node_modules`（含嵌套）是否泄漏 `@napi-rs/canvas*`。 */
+function findLeakedCanvasPackages(rootNodeModules: string): string[] {
+  if (!existsSync(rootNodeModules)) return []
+  const leaked: string[] = []
+  const queue: string[] = [rootNodeModules]
+  while (queue.length > 0) {
+    const nodeModulesDir = queue.pop()
+    if (nodeModulesDir === undefined) break
+    let entries: string[]
+    try {
+      entries = readdirSync(nodeModulesDir)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.startsWith('.')) continue
+      const entryPath = join(nodeModulesDir, entry)
+      if (entry === '@napi-rs') {
+        let scopedEntries: string[]
+        try {
+          scopedEntries = readdirSync(entryPath)
+        } catch {
+          continue
+        }
+        for (const scoped of scopedEntries) {
+          if (scoped === 'canvas' || scoped.startsWith('canvas-')) {
+            leaked.push(join(entryPath, scoped))
+          } else {
+            const nested = join(entryPath, scoped, 'node_modules')
+            if (existsSync(nested)) queue.push(nested)
+          }
+        }
+        continue
+      }
+      if (entry.startsWith('@')) {
+        let scopedEntries: string[]
+        try {
+          scopedEntries = readdirSync(entryPath)
+        } catch {
+          continue
+        }
+        for (const scoped of scopedEntries) {
+          const nested = join(entryPath, scoped, 'node_modules')
+          if (existsSync(nested)) queue.push(nested)
+        }
+        continue
+      }
+      const nested = join(entryPath, 'node_modules')
+      if (existsSync(nested)) queue.push(nested)
+    }
+  }
+  return leaked
+}
+
+/** 有限深度的包体积观察（只统计普通文件；符号链接/ASAR 虚拟项跳过）。 */
+function measurePackagedTree(rootPath: string): { files: number; bytes: number } {
+  let files = 0
+  let bytes = 0
+  let visited = 0
+  const stack: string[] = [rootPath]
+  while (stack.length > 0 && visited < 60_000) {
+    const dir = stack.pop()
+    if (dir === undefined) break
+    let entries: string[]
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of entries) {
+      visited += 1
+      if (visited >= 60_000) break
+      const full = join(dir, name)
+      try {
+        const info = lstatSync(full)
+        if (info.isDirectory()) stack.push(full)
+        else if (info.isFile()) {
+          files += 1
+          bytes += info.size
+        }
+      } catch {
+        // 已消失/不可读的条目不计入观察。
+      }
+    }
+  }
+  return { files, bytes }
 }
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-packaged-profile-resolver-'))
@@ -236,5 +449,6 @@ try {
 await verifyBundledSkills(fileURLToPath(new URL('./', installAnchor)))
 await smokeSessionMigration()
 await smokeDiagnosticExportWorker()
+await smokeKnowledgeWorkers()
 
 process.stdout.write(OK_MARKER)

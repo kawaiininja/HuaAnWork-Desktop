@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import type { GuardMode } from '@huaanwork/policy'
 import { catalogRootUrl } from '@huaanwork/policy/agent-catalog'
 import { isLanEndpoint } from '@huaanwork/policy/network'
@@ -349,7 +350,6 @@ export async function writeHuaanworkSettings(profileDir: string, patch: unknown)
   const filePath = join(profileDir, 'huaanwork-settings.json')
   const current = await readHuaanworkSettings(profileDir)
   const next = mergeSettings(current, patch)
-  await mkdir(profileDir, { recursive: true })
-  await writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+  await writeFileAtomic(filePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
   return next
 }

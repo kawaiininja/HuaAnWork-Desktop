@@ -159,6 +159,16 @@ if (rootLicense === undefined || !ALLOWED_LICENSES.has(rootLicense)) {
 }
 
 /**
+ * Optional dependencies explicitly excluded from packaged installers by
+ * `package.json` `build.files` (and blocked at runtime by
+ * `blockOptionalCanvasAddon()`). Excluding them here keeps license verification
+ * and `THIRD_PARTY_NOTICES.md` aligned with what actually ships.
+ */
+function isExcludedOptionalPackage(name) {
+  return name === '@napi-rs/canvas' || name.startsWith('@napi-rs/canvas-')
+}
+
+/**
  * Verify one queue entry and append its production dependencies.
  * @param {QueueEntry} current - entry to verify.
  * @param {QueueEntry[]} queue - queue the dependencies are appended to.
@@ -202,6 +212,7 @@ function visit(current, queue) {
 
   for (const section of ['dependencies', 'optionalDependencies']) {
     for (const name of Object.keys(manifest[section] ?? {})) {
+      if (section === 'optionalDependencies' && isExcludedOptionalPackage(name)) continue
       const resolved = resolvePackageManifest(name, current.manifestPath)
       if (resolved === undefined) {
         // Optional dependencies may legitimately be absent on this platform.

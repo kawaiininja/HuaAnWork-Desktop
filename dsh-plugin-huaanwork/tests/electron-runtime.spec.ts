@@ -289,6 +289,25 @@ const electron = vi.hoisted(() => {
   }
 
   const trays: Tray[] = []
+  const powerMonitorListeners = new Map<string, Set<() => void>>()
+  const powerMonitor = {
+    on: vi.fn((event: string, listener: () => void) => {
+      const set = powerMonitorListeners.get(event) ?? new Set<() => void>()
+      powerMonitorListeners.set(event, set)
+      set.add(listener)
+      return powerMonitor
+    }),
+    off: vi.fn((event: string, listener: () => void) => {
+      powerMonitorListeners.get(event)?.delete(listener)
+      return powerMonitor
+    }),
+    emit(event: string): void {
+      for (const listener of [...(powerMonitorListeners.get(event) ?? [])]) listener()
+    },
+    reset(): void {
+      powerMonitorListeners.clear()
+    },
+  }
   const createFromPath = vi.fn((path: string) => {
     if (path.endsWith('app-icon.png')) return appIcon
     if (path.endsWith('tray-iconTemplate.png')) return templateIcon
@@ -389,6 +408,7 @@ const electron = vi.hoisted(() => {
         },
       }
     })(),
+    powerMonitor,
     templateIcon,
     Tray,
     trays,
@@ -422,6 +442,7 @@ vi.mock('electron', () => ({
   nativeTheme: electron.nativeTheme,
   net: electron.net,
   powerSaveBlocker: electron.powerSaveBlocker,
+  powerMonitor: electron.powerMonitor,
   Notification: electron.Notification,
   screen: electron.screen,
   shell: electron.shell,
@@ -525,6 +546,7 @@ describe('Electron desktop runtime', () => {
     electron.shell.openPath.mockResolvedValue('')
     electron.nativeTheme.themeSource = 'system'
     electron.powerSaveBlocker.reset()
+    electron.powerMonitor.reset()
     electron.resetZoomLevel()
     electron.resetDevTools()
   })
@@ -533,6 +555,32 @@ describe('Electron desktop runtime', () => {
     clearMainWindowState()
     vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('bridges powerMonitor resume through subscribeSystemResume with an idempotent unsubscribe', async () => {
+    const { ElectronDesktopRuntime } = await import('../src/electron-runtime.ts')
+    const runtime = new ElectronDesktopRuntime(async () => {})
+    const listener = vi.fn()
+
+    const releaseFirst = runtime.subscribeSystemResume(listener)
+    expect(electron.powerMonitor.on).toHaveBeenCalledWith('resume', expect.any(Function))
+    const firstHandler = electron.powerMonitor.on.mock.calls[0]?.[1]
+    electron.powerMonitor.emit('resume')
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    releaseFirst()
+    expect(electron.powerMonitor.off).toHaveBeenCalledTimes(1)
+    expect(electron.powerMonitor.off).toHaveBeenCalledWith('resume', firstHandler)
+    // I-10 回归：重复调用取消函数必须是真正 no-op，不能再调 off，也不能误杀随后用同一 listener 建立的新订阅。
+    const releaseSecond = runtime.subscribeSystemResume(listener)
+    releaseFirst()
+    expect(electron.powerMonitor.off).toHaveBeenCalledTimes(1)
+    electron.powerMonitor.emit('resume')
+    expect(listener).toHaveBeenCalledTimes(2)
+
+    releaseSecond()
+    electron.powerMonitor.emit('resume')
+    expect(listener).toHaveBeenCalledTimes(2)
   })
 
   it('uses the independent macOS compatibility frame, Dock icon, and template tray image', async () => {

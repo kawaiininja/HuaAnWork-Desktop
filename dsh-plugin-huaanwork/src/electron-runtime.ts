@@ -7,6 +7,7 @@ import {
   nativeTheme,
   net,
   Notification,
+  powerMonitor,
   powerSaveBlocker,
   shell,
 } from 'electron'
@@ -49,6 +50,7 @@ import type {
 } from './runtime.ts'
 import type { ArtifactRef } from './client-huaanwork/rpc-types.ts'
 import type { RendererBootReport } from './renderer-boot-contract.ts'
+import type { SystemResumeRuntime } from './host-runtime-bridge.ts'
 import {
   DesktopRendererHealthGate,
   type DesktopRendererHealthGateOptions,
@@ -191,7 +193,7 @@ export function requestDesktopArtifact(url: string, init: RequestInit): Promise<
 }
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
-export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCapability {
+export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCapability, SystemResumeRuntime {
   setupOnboarding?: import('./setup-onboarding-bridge.ts').DesktopOnboardingBridge
   readonly platform: DesktopPlatform
   private readonly platformStrategy: ElectronPlatformStrategy
@@ -793,6 +795,25 @@ export class ElectronDesktopRuntime implements DesktopRuntime, ArtifactNativeCap
     if (id === undefined) return
     this.keepAwakeBlockerId = undefined
     if (powerSaveBlocker.isStarted(id)) powerSaveBlocker.stop(id)
+  }
+
+  /**
+   * 系统休眠恢复桥（R3-I3）：main 侧把 `powerMonitor` 的 `resume` 事件转成 Host
+   * 窄接口回调。每次订阅绑定独立包装函数与 active 标志，重复取消是真正 no-op，
+   * 不会误伤复用同一 `listener` 引用的其他订阅。
+   */
+  subscribeSystemResume(listener: () => void): () => void {
+    let active = true
+    const handler = (): void => {
+      if (!active) return
+      listener()
+    }
+    powerMonitor.on('resume', handler)
+    return () => {
+      if (!active) return
+      active = false
+      powerMonitor.off('resume', handler)
+    }
   }
 
   /** 弹原生重启确认框,只回传用户裁决;是否/何时 restart 由调用方决定。 */

@@ -300,6 +300,10 @@ const electron = vi.hoisted(() => {
       stop: vi.fn(),
       isStarted: vi.fn(() => true),
     },
+    powerMonitor: {
+      on: vi.fn(),
+      off: vi.fn(),
+    },
     screen: {
       getDisplayMatching: vi.fn(() => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 } })),
     },
@@ -325,6 +329,7 @@ vi.mock('electron', () => ({
   nativeTheme: electron.nativeTheme,
   net: electron.net,
   powerSaveBlocker: electron.powerSaveBlocker,
+  powerMonitor: electron.powerMonitor,
   Notification: electron.Notification,
   screen: electron.screen,
   shell: electron.shell,
