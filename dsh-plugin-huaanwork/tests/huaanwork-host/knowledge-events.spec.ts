@@ -30,7 +30,7 @@ describe('knowledge events log and checkpoint/diagnostics exclusion', () => {
   })
   it('masks secrets before UTF-8 byte truncation and enforces 500 lines / 512 KB bounds', async () => {
     const kbDir = mkdtempSync(join(tmpdir(), 'kb-events-'))
-    const longDetail = `Bearer sk-secret-token-1234567890 api_key=abc123456789 ${'中文详情'.repeat(2_000)}`
+    const longDetail = `Bearer sk-secret-token-1234567890 api_key=aaaaaaaaaaaa ${'中文详情'.repeat(2_000)}`
     const ev = await appendKnowledgeEvent(kbDir, {
       kind: 'file_error',
       level: 'error',
@@ -42,21 +42,22 @@ describe('knowledge events log and checkpoint/diagnostics exclusion', () => {
     expect(Buffer.byteLength(ev.summary, 'utf8')).toBeLessThanOrEqual(EVENT_SUMMARY_MAX_BYTES)
     expect(Buffer.byteLength(ev.detail ?? '', 'utf8')).toBeLessThanOrEqual(EVENT_DETAIL_MAX_BYTES)
     // M-2：断言磁盘落盘内容不含密钥原文，并验证跨 512B 截断边界的密钥先脱敏再截断
-    // （504B 中文 + 空格后紧接 sk-... 跨越 512B：若先截断只剩 sk-Boun 将逃过正则，先脱敏则变为 sk-****）。
-    const boundarySecret = 'sk-BoundarySecret9876543210'
+    // （504B 中文 + 空格后紧接 sk-... 跨越 512B：若先截断只剩 sk-aaa 将逃过正则，先脱敏则变为 sk-****）。
+    // 低熵虚构 token：仍命中 sk- 脱敏正则，但避免 gitleaks generic-api-key 高熵误报。
+    const boundarySecret = 'sk-aaaaaaaaaaaaaaaaaaaa'
     const boundaryEv = await appendKnowledgeEvent(kbDir, {
       kind: 'file_error',
       level: 'error',
       summary: `${'详'.repeat(168)} ${boundarySecret}`,
       relPath: `${'p'.repeat(EVENT_MAX_BYTES + 10_000)}/secret.md`,
     })
-    expect(boundaryEv.summary).not.toContain('Boundary')
+    expect(boundaryEv.summary).not.toContain('aaaaaaaaaa')
     expect(boundaryEv.summary).toContain('sk-****')
     expect(Buffer.byteLength(boundaryEv.relPath ?? '', 'utf8')).toBeLessThanOrEqual(EVENT_DETAIL_MAX_BYTES)
     const diskAfterBoundary = readFileSync(join(kbDir, 'events.jsonl'), 'utf8')
     expect(diskAfterBoundary).not.toContain('sk-1234567890abcdef')
     expect(diskAfterBoundary).not.toContain('sk-secret-token-1234567890')
-    expect(diskAfterBoundary).not.toContain('Boundary')
+    expect(diskAfterBoundary).not.toContain('aaaaaaaaaa')
     // M-1：超大 relPath 被安全截断，单条记录绝不会把 events.jsonl 撑破 512 KB 上限。
     expect(Buffer.byteLength(diskAfterBoundary, 'utf8')).toBeLessThanOrEqual(EVENT_MAX_BYTES)
 

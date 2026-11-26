@@ -24,6 +24,8 @@ import { resolveKnowledgeWorkerUrl } from './worker-paths.ts'
 export const DEFAULT_EXTRACTION_WORKERS = 1
 export const MAX_EXTRACTION_WORKERS = 2
 export const DEFAULT_EXTRACTION_TIMEOUT_MS = 60_000
+// 冷启动耗时与逐文件提取耗时是两回事：短提取超时（测试缝）不得误杀慢速机器上的正常启动。
+export const EXTRACTION_WORKER_STARTUP_TIMEOUT_MS = 10_000
 export const EXTRACTION_WORKER_MAX_OLD_GEN_MB = 256
 /** 退场预算：到期直接放弃等待（terminate 已发出）。 */
 export const EXTRACTION_POOL_DISPOSE_BUDGET_MS = 300
@@ -457,10 +459,12 @@ export function createExtractionPool(opts: ExtractionPoolOptions = {}): Extracti
       return outcome
     }
 
-    // Worker 首次拉起的 ready 握手同样受启动超时与取消保护（I-11）。
+    // Worker 首次拉起的 ready 握手受独立启动预算下限保护（I-11）：启动耗时不同于逐文件
+    // 提取耗时，短提取超时不得误杀慢速 CI 上的正常冷启动；卡死启动仍由该下限绑定并 terminate。
+    const startupBudgetMs = Math.max(config.timeoutMs, EXTRACTION_WORKER_STARTUP_TIMEOUT_MS)
     const readyTimer = setTimeout(() => {
-      settleTimeoutAfterKill(`extraction worker startup exceeded ${String(config.timeoutMs)} ms`)
-    }, config.timeoutMs)
+      settleTimeoutAfterKill(`extraction worker startup exceeded ${String(startupBudgetMs)} ms`)
+    }, startupBudgetMs)
     try {
       await Promise.race([slot.ready, outcome.then(() => undefined)])
     } catch (error) {
