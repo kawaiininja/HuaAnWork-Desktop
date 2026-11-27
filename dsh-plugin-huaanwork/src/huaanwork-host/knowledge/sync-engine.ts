@@ -109,6 +109,13 @@ export interface KnowledgeSyncEngineOptions {
   readonly watchFactory?: SyncWatchFactory
   readonly detectCloudPlaceholder?: (filePath: string) => 'local' | 'dehydrated' | 'probe-unavailable'
   readonly cancelOrganizerForKb?: (kbId: string) => Promise<void>
+  /**
+   * 阶段 1 对账真正提交后的统一回调（M1-2 Task 6）。
+   *
+   * `startup` / `debounce` / `periodic` / `manual` / `resume` / `rebind` 六种 trigger
+   * 都只在事件写完、相位落定且 epoch 仍有效时调用；失败对账与 epoch 失效的中途返回不调用。
+   */
+  readonly onIndexCommitted?: (kbId: string) => void
   readonly afterCommitBeforeReopenForTest?: () => void
   readonly failWikiResetOnceForTest?: () => void
 }
@@ -304,6 +311,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     ?? ((sourceDir: string) => watch(sourceDir, { recursive: true }))
   const probeCloud = opts.detectCloudPlaceholder ?? ((filePath: string) => detectCloudPlaceholder(filePath))
   const cancelOrganizerForKb = opts.cancelOrganizerForKb
+  const onIndexCommitted = opts.onIndexCommitted
 
   const runtimes = new Map<string, Runtime>()
   const startInFlight = new Map<string, Promise<void>>()
@@ -1129,6 +1137,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     await flushReport(kbDir, report)
     runtime.lastSyncedAt = new Date(nowWall()).toISOString()
     settlePhase(runtime)
+    // 阶段 1 的唯一提交点：事件已写完、相位已落定且 epoch 仍有效才通知下一阶段；
+    // 上面任何中途 return 与 `reconcile()` 的 catch 都不会走到这里。
+    if (runtime.epoch === epoch && isRuntimeLive(runtime)) onIndexCommitted?.(kbId)
   }
 
   async function flushReport(kbDir: string, report: SyncReport): Promise<void> {

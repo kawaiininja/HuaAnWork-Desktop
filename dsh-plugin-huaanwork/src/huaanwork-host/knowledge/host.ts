@@ -243,6 +243,10 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     cancelOrganizerForKb: async (kbId: string) => {
       await organizerHooks?.cancelForKb(kbId)
     },
+    // 阶段 1 提交后统一通知整理排期；钩子未注入时保持无副作用（Host 可独立使用）。
+    onIndexCommitted: (kbId: string) => {
+      notifyOrganizerPending(kbId)
+    },
     ...(opts.debounceMs === undefined ? {} : { debounceMs: opts.debounceMs }),
     ...(opts.writeStableMs === undefined ? {} : { writeStableMs: opts.writeStableMs }),
     ...(opts.reconcileIntervalMs === undefined ? {} : { reconcileIntervalMs: opts.reconcileIntervalMs }),
@@ -492,6 +496,9 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       await rm(kbRoot, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
+    // 注册表已提交：启动对账可能早于 commit 完成（当时本库还不是候选），
+    // 这里补一次全局排期，保证 create 成功后必然评估阶段 2（R2-4）。
+    notifyOrganizerPending(id)
     return record
   }
 
@@ -528,6 +535,10 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
     maintainingIds.add(kbId)
+    /** 重绑已在引擎内落地（落盘 + 对账返回）：解锁后必须补偿一次整理排期。 */
+    let rebindSucceeded = false
+    /** 整个 `update` 正常返回；任何失败路径都不得触发补偿通知。 */
+    let updateSucceeded = false
     try {
       let next: KnowledgeBaseRecord = record
       /** 已经随重绑落盘并同步进内存的记录（避免重复写同一内容）。 */
@@ -593,6 +604,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
         }
         next = rebound
         persistedNext = rebound
+        rebindSucceeded = true
       }
 
       const wantPause = patch.watchPaused === true && !next.watchPaused
@@ -622,9 +634,13 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       if (wantResume) {
         await engine.resumeWatch(kbId, { awaitReconcile: false })
       }
+      updateSucceeded = true
       return next
     } finally {
       maintainingIds.delete(kbId)
+      // 重绑对账在维护中发出的通知会被 organizer 按维护跳过；解锁后必须补偿，
+      // 但失败（含重绑之外的后续步骤失败）一律不通知。
+      if (rebindSucceeded && updateSucceeded) notifyOrganizerPending(kbId)
     }
   }
 
@@ -695,12 +711,21 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
     maintainingIds.add(kbId)
+    let rebuilt = false
     try {
       await engine.rebuildIndex(kbId)
+      rebuilt = true
     } finally {
       maintainingIds.delete(kbId)
     }
     await refreshStats(kbId)
+    // 只有成功重建且不在两种恢复相位时才排期；失败路径不通知。
+    if (rebuilt) {
+      const phase = engine.getState(kbId)?.phase
+      if (phase !== 'wiki-reset-pending' && phase !== 'index-error') {
+        notifyOrganizerPending(kbId)
+      }
+    }
   }
 
   async function listDocs(kbId: string, filter?: ListDocsFilter): Promise<ListDocsResult> {
@@ -1012,6 +1037,15 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
 
   function setOrganizerHooks(hooks: KnowledgeOrganizerHooks): void {
     organizerHooks = hooks
+  }
+
+  /** 提交后的整理排期通知：钩子异常只告警，绝不把已提交的操作改判为失败。 */
+  function notifyOrganizerPending(kbId: string): void {
+    try {
+      organizerHooks?.notifyPending?.(kbId)
+    } catch (error) {
+      console.warn(`[knowledge] organize notification failed for ${kbId}: ${String(error)}`)
+    }
   }
 
   function setRemovalHook(hook: (kbId: string) => Promise<void>): void {
