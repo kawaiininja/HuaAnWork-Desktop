@@ -44,6 +44,7 @@ import type {
   KnowledgeBaseStats,
   KnowledgeBaseSummary,
   KnowledgeEventRecord,
+  KnowledgeOrganizerPhase,
   ListDocsFilter,
   ListDocsResult,
   PendingOrganizeBatch,
@@ -140,6 +141,12 @@ export interface KnowledgeHost {
   setRemovalHook(hook: (kbId: string) => Promise<void>): void
   /** 已登记且不在删除中的知识库 id 副本；调用方 mutate 不影响 Host 注册表。 */
   getRegisteredKnowledgeBaseIds(): ReadonlySet<string>
+  /** 手动整理前置校验：未知/删除/维护/recovery 相位拒绝；不检查 autoOrganize。 */
+  assertOrganizeAllowed(kbId: string): void
+  /** 写入四个整理相位之一；runtime 不 live、维护/删除锁或 recovery 时返回 false。 */
+  setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean
+  /** 仅当当前仍是整理相位时恢复空闲相位；绝不覆盖同步/恢复相位。 */
+  clearOrganizerPhase(kbId: string): void
   /** 阶段 2 候选：自动开启库或本次手动集合中的库，排除删除/维护与两种恢复相位。 */
   listOrganizeCandidates(manualKbIds?: ReadonlySet<string>): readonly KnowledgeBaseRecord[]
   /** 只读查询下一批（不写任何状态），供调度器在准入前判断空批与退避。 */
@@ -708,6 +715,29 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   }
 
   /**
+   * 手动整理前置校验（M1-2 Task 5）：直接复用既有记录与锁集合，不复制状态机；
+   * recovery 相位按同名 `KnowledgeSyncError` 拒绝。`autoOrganize` 不参与判断。
+   */
+  function assertOrganizeAllowed(kbId: string): void {
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    assertNotMaintaining(kbId)
+    const phase = engine.getState(kbId)?.phase
+    if (phase === 'wiki-reset-pending' || phase === 'index-error') {
+      throw new KnowledgeSyncError(phase, `knowledge base ${kbId} is in ${phase}`)
+    }
+  }
+
+  /** 整理相位窄接口只做委托，状态机留在 SyncEngine。 */
+  function setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean {
+    return engine.setOrganizerPhase(kbId, phase)
+  }
+
+  function clearOrganizerPhase(kbId: string): void {
+    engine.clearOrganizerPhase(kbId)
+  }
+
+  /**
    * 阶段 2 候选（规格 §8.1）：只按注册表与运行相位筛选，不读 Storage。
    * `watch-paused` / `watch-failed` / `source-unavailable` 不阻断整理；只有
    * 删除、维护与 `wiki-reset-pending` / `index-error` 被排除。
@@ -1042,6 +1072,9 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     setOrganizerHooks,
     setRemovalHook,
     getRegisteredKnowledgeBaseIds,
+    assertOrganizeAllowed,
+    setOrganizerPhase,
+    clearOrganizerPhase,
     listOrganizeCandidates,
     peekPendingOrganizeBatch,
     openOrganizeBatch,

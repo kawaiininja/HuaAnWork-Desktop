@@ -29,6 +29,18 @@ export interface KnowledgeBaseRecord {
   readonly createdAt: string
 }
 
+/**
+ * 整理槽四个相位（M1-2 Task 5 / 规格 §8.3）。
+ *
+ * 与 `KnowledgePhase` 的四个同名值保持字面一致；Host/SyncEngine 的窄接口只用本类型，
+ * 避免把同步相位误当成整理相位写入或清除。
+ */
+export type KnowledgeOrganizerPhase =
+  | 'waiting-turn-slot'
+  | 'organizing'
+  | 'blocked-no-model'
+  | 'blocked-network'
+
 export type KnowledgePhase =
   | 'watching'
   | 'syncing'

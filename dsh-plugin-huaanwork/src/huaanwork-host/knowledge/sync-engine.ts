@@ -42,6 +42,7 @@ import type {
   DocumentRecordSummary,
   KnowledgeBaseRecord,
   KnowledgeErrorCode,
+  KnowledgeOrganizerPhase,
   KnowledgePhase,
   UpsertDocumentInput,
 } from './types.ts'
@@ -158,6 +159,13 @@ export interface KnowledgeSyncEngine {
   onSystemResume(listener: () => void): () => void
   checkClockJump(): Promise<boolean>
   acquireLifecycleLock(kbId: string, mode: 'maintain' | 'delete'): Promise<() => void>
+  /**
+   * 写入四个整理相位之一。runtime 不 live、维护/删除锁或 recovery 相位时返回 false，
+   * 且不改动原相位；Host 只做委托。
+   */
+  setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean
+  /** 仅当当前仍是四个整理相位之一时恢复 `idlePhase(runtime)`，绝不覆盖同步/恢复相位。 */
+  clearOrganizerPhase(kbId: string): void
   getState(kbId: string): KnowledgeRuntimeState | undefined
   getMetricsForTest(kbId: string): SyncEngineMetrics
   setCaseSensitiveForTest(kbId: string, caseSensitive: boolean): void
@@ -233,6 +241,13 @@ function isSteadyPhase(phase: KnowledgePhase): boolean {
     || phase === 'watch-paused'
     || phase === 'watch-failed'
     || phase === 'source-unavailable'
+}
+
+function isOrganizerPhase(phase: KnowledgePhase): phase is KnowledgeOrganizerPhase {
+  return phase === 'waiting-turn-slot'
+    || phase === 'organizing'
+    || phase === 'blocked-no-model'
+    || phase === 'blocked-network'
 }
 
 function needsRecovery(phase: KnowledgePhase): boolean {
@@ -313,6 +328,29 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   function settlePhase(runtime: Runtime): void {
     if (runtime.maintaining) return
     if (needsRecovery(runtime.phase)) return
+    // 整理相位由 organizer 的 Host/SyncEngine 窄接口维护，对账结束不得刷回空闲相位。
+    if (isOrganizerPhase(runtime.phase)) return
+    runtime.phase = idlePhase(runtime)
+  }
+
+  /**
+   * 写入整理相位：live、非维护/删除锁、非 recovery 时才生效。
+   * 返回 false 表示未写入，调用方不应假设相位已改变。
+   */
+  function setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean {
+    const runtime = runtimes.get(kbId)
+    if (runtime === undefined || !isRuntimeLive(runtime)) return false
+    if (runtime.maintaining || runtime.stopped || locks.has(kbId)) return false
+    if (needsRecovery(runtime.phase)) return false
+    runtime.phase = phase
+    return true
+  }
+
+  /** 仅恢复仍由整理持有的相位；syncing/rebuilding/recovery 与其它同步相位原样保留。 */
+  function clearOrganizerPhase(kbId: string): void {
+    const runtime = runtimes.get(kbId)
+    if (runtime === undefined) return
+    if (!isOrganizerPhase(runtime.phase)) return
     runtime.phase = idlePhase(runtime)
   }
 
@@ -1326,7 +1364,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     const runtime = requireRuntime(kbId)
     if (runtime.watchPaused) return
     runtime.watchPaused = true
-    if (!needsRecovery(runtime.phase)) runtime.phase = 'watch-paused'
+    if (!needsRecovery(runtime.phase) && !isOrganizerPhase(runtime.phase)) runtime.phase = 'watch-paused'
     runtime.epoch += 1
     // I-2 / M-4：同步取消所有错峰与写稳等待定时器，确保暂停返回后零后台扫盘与文件句柄。
     cancelRuntimeStaggerTimers(runtime)
@@ -1337,7 +1375,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     // 规格 §6.1：暂停应答返回前必须让在途 FileHandle 全部关闭。
     await pool.abortAndDrainKb(kbId)
     await runtime.chain.catch(() => undefined)
-    if (!runtime.maintaining && !needsRecovery(runtime.phase)) runtime.phase = 'watch-paused'
+    if (!runtime.maintaining && !needsRecovery(runtime.phase) && !isOrganizerPhase(runtime.phase)) {
+      runtime.phase = 'watch-paused'
+    }
   }
 
   async function resumeWatch(kbId: string, resumeOpts?: { readonly awaitReconcile?: boolean }): Promise<void> {
@@ -1346,7 +1386,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtime.watchFailed = false
     closeWatcher(runtime)
     ensureWatcher(runtime)
-    if (!needsRecovery(runtime.phase)) runtime.phase = idlePhase(runtime)
+    if (!needsRecovery(runtime.phase) && !isOrganizerPhase(runtime.phase)) runtime.phase = idlePhase(runtime)
     const reconcileTask = enqueueReconcile(runtime, { allowRename: true, trigger: 'resume' })
     if (resumeOpts?.awaitReconcile === false) {
       void reconcileTask.catch(() => undefined)
@@ -1819,6 +1859,8 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     onSystemResume,
     checkClockJump,
     acquireLifecycleLock,
+    setOrganizerPhase,
+    clearOrganizerPhase,
     getState(kbId: string): KnowledgeRuntimeState | undefined {
       const runtime = runtimes.get(kbId)
       if (runtime === undefined) return undefined
