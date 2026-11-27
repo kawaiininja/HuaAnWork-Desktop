@@ -12,7 +12,7 @@
   - 计划评审：[2026-11-25-knowledge-base-m1-2-plan-review.md](./2026-11-25-knowledge-base-m1-2-plan-review.md)（D1/D2、R2/R3、G-I1/G-M1/G-N1–G-N8、R-1–R-4）
 - **评审方式：** 按 `superpowers:requesting-code-review` 派发独立 `general-purpose` reviewer；对 HEAD 做只读源码审查、定向测试、typecheck 与完整门禁。本文档由主会话根据 reviewer 最终报告整理，关键问题定位在落档前再次读码复核。
 - **范围外：** 真机/GUI、维护页、composer、引用预览与打包应用整理槽观察按计划归 M1-3/发布验收；两个既存未跟踪文件 `2026-11-25-knowledge-base-m1-3-session-mount-ui-citations.md`、`2026-11-25-knowledge-base-m2-0-legacy-office-spike.md` 不属于本次评审。
-- **当前判定：** **With fixes / 修复后可合并（0 Critical / 1 Important / 5 Minor）。** 实现与计划及 owner 裁定高度一致，完整 `corepack yarn check` 实跑退出码为 0；合并前应修复 I-1，Minor 不阻塞。
+- **当前判定：** **Ready to merge / Yes（§十，2026-11-27 合并前最终复核 + IMP-1 补修闭环）。** 0 Critical / 0 Important 开放；IMP-1（符号链接 + `..` 物理穿越越界写）经独立反证坐实并红绿修复，修复后完整 `corepack yarn check` 实跑 `GATE_EXIT=0`（Vitest 5788 passed / 0 failed）；MIN-1 与既有延后债务按原定里程碑承接。历史判定（§五 With fixes、§6.5/§7.6/§9.2 Yes）保留原文。
 - **GLM 轨校准与修复确认（2026-11-27）：** §三 六项事实全部属实；I-1、M-2 已修复并补 3 条回归测试，修复已提交为 `728c7619e4`，完整 `corepack yarn check` 实跑 `GATE_EXIT=0`；M-1 已裁定为「停止并抑制自动重启」，须在 M1-3 接入取消路由之前落地，代码落地时点与是否现在写入计划 L525 两项待定（§6.6）；M-3/M-4/M-5 按原文留下一轮。逐条校准、验证记录与裁定全文见 §六。
 
 严重度口径：
@@ -329,3 +329,62 @@ I-1 按原评审首选的快照方案落地并封住异常路径，M-2 在两层
 - **聚焦复验：** 8 个相关 spec（`knowledge-org-isolation` 19、`knowledge-tool-allow` 16、`policy.cordis` 36、`limits-goal` 2、`result-artifact-tools` 22、`expert-team-dispatch` 11、`knowledge-organizer` 49、`knowledge-organizer-integration` 23）共 **178 passed / 0 failed**；`corepack yarn workspace dsh-plugin-huaanwork typecheck`（5 工程）退出码 0；`git diff --check` 与 `node scripts/check-whitespace.mjs` 退出码 0。
 - **完整门禁：** 独立执行 `corepack yarn check`（输出重定向显式记录退出码）→ **`GATE_EXIT=0`**；全仓 Vitest **5786 passed / 15 skipped / 0 failed**（`dsh-plugin-huaanwork` 5039 passed，较 §6.3 的 5782 正好 +4），全部 15 个 `node:test` 套件 `# fail 0`，`verify-layout` / `verify-runtime-closure`（316 nodes）/ `verify-bundled-runtime`（150 files）/ `verify-profile-boot` ×2 / `verify-licenses` / `verify-operation-reliability` 全部通过。
 - **合并评估：** **Ready to merge（Yes）。** Q-M1、Q-N1、Q-N2 全部闭环；剩余 M-1、D-1、D-2、D-3、M-3/M-4/M-5、N-2 及真机项 R-4 均已落盘并按原定里程碑边界承接。
+
+---
+
+## 十、合并前最终复核与 IMP-1 补修（2026-11-27）
+
+> 本节由主会话按 `superpowers:requesting-code-review` 派发独立 `general-purpose` reviewer 对 HEAD `7768438714` 做合并前最终复核后追加；关键发现经主会话独立反证（源码证据链 + 库外物理 demo），IMP-1 按 owner 裁定当场红绿补修。§一～§九原文保持不动。
+
+### 10.1 复核范围与判决
+
+- 范围 `5fc019eddf..7768438714`（16 提交 / 46 文件 / +10663 −94），最后代码提交 `34cd621246`；master 无漂移（仍停在 merge-base）。
+- Reviewer 五轮 pass（已闭环边界 / 补修新鲜眼 / 全范围对照计划与规格 / 延后债务边界 / 测试覆盖静态评估），全程只读、未实跑；判决 **With fixes：0 Critical / 1 Important（IMP-1）/ 1 Minor（MIN-1）**。
+- 已闭环项 I-1 / M-2 / Q-M1 / Q-N1 / Q-N2 逐条读码复核**维持**；延后债务边界核实：M-1 / D-1 / D-3 产品面不可达成立（ROUTE_TABLE=92、无 organize 路由、无生产 `user-stop` / `triggerManual` 调用方）；**D-2 确认可经自动整理链路到达**（write 工具无全库总量闸，模型可经 `topics/` 灌水越限后连纯墓碑收缩也被拒），其延后依据是「待规格裁定」而非不可达，§八表述诚实；M-3/M-4/M-5、N-2、R-4、§8.1 微残余维持。
+
+### 10.2 IMP-1：符号链接 + `..` 物理穿越越界写（Important，已修复）
+
+**形态：** `wiki/` 内一条**已存在**、指向平台临时区已存在目录的目录符号链接 `sub`，模型发 `write`/`edit` `{file_path:"sub/../evil.md"}` → 两层策略缝放行 → 文件真实写进临时区。read/glob/grep 同形条件性越界读/列目录（折叠后库内路径存在时）。
+
+**主会话独立反证（源码 7 环 + 2 个库外 scratch demo，全部坐实）：**
+
+1. 桌面词法折叠：`policy.ts:268` 与 `paths.ts:24` 均 `path.resolve`，`sub/..` 折成库内 `evil.md`；`hasSymlinkSegment` 在折叠后路径上逐段 lstat，永远看不到 `sub`（ENOENT → 放行）；decide 的 `resolveInside(forWrite)` 同折 → allow。
+2. 上游原始拼写直传：`tool-fs/write.ts:118` 把原始 `file_path` 交 `ctx.fs.resolve`；`fs-local/index.ts:135` 交 `resolveLocalTarget`。
+3. `fsio.ts:148`：POSIX 下含 `..` 段保留物理拼写（不折叠）。
+4. `fsio.ts:18`：`realpath = promisify(realpathCallback.native)` —— **native** realpath 物理穿越（特意核实非会词法折叠的 JS 版；`roots.ts:32-35` 注释同证）。
+5. Demo ①：纯拼接原始拼写 `wiki/sub/../evil.md` 内核写入 → **库外落点存在、折叠落点不存在**；Demo ②：`realpathSync.native(wiki/sub/..)` = 库外目录 → 目标缺失时祖先回退分支 targetKey 落库外。（首轮 demo 误用 `path.join` 先折叠得出相反结论，改纯拼接后坐实——反证本身经两次校准。）
+6. `fs-local/index.ts:236`：`writeFileAtomic(target.targetKey)` 按物理落点写。
+7. `roots.ts:54`：workspace-write 可写根 = workspaceRoot + `/tmp` + `tmpdir()`（canonical）；`fs-sandbox/index.ts:132-143` `checkedTarget` 按 canonical targetKey 判包含 → 临时区落点放行，**写真实成功**。
+
+**与 Q-N2 的区别：** 悬空链接形态被上游 `FsError`（`missing.includes('..')`）/mkdir 挡住，未产生真实越界写（Nit）；本形态写实际成功，且恰好绕过 `34cd621246` 新增的逐段 lstat 防线本身。
+
+**严重度校准：** Important（合并前修）。前置链接整理 Agent 自身造不出（白名单无 symlink 能力，write/edit 只产常规文件，宿主只 mkdir/删登记文档），需用户/外部进程预先植入；落点被上游沙箱限制在临时区而非任意用户目录——与计划评审 I-9 同级。按字面「安全边界 fail-open」口径可升 Critical，修复动作相同且立即。
+
+### 10.3 补修（红绿闭环）与 MIN-1
+
+**修法（`policy.ts` +34/-3）：** 新增 `organizerParentTraversalDenial`——整理槽 fs 路径参数键（`path/file/file_path/root`，与 `pathsAreInside` 同集合；`WRITE_PATH_KEYS` 更名 `FS_PATH_KEYS`）的**原始拼写**含 `..` 段（`/[\\/]/` 两种分隔符）直接具名拒绝 `REASON_ORGANIZER_PARENT_TRAVERSAL`；两层缝（pre-execute + guard）先于 `organizerWriteDenial` 执行。整理提示词只要求 wiki 根相对下行路径，`..` 无合法用途；普通会话与 `kb_org_*`（无路径字符串参数）零影响。
+
+**新增 2 条判别测试（先红后绿，`knowledge-tool-allow.spec.ts` +51）：**
+
+| 测试 | 修复前（实跑 RED） | 修复后（实跑 GREEN） |
+| --- | --- | --- |
+| 已存在目录链接 + `sub/../evil.md`（含反斜杠拼写）write/edit 三档两层缝 + 库内合法写正对照 | `allow` | deny（原因含「下行路径」），正对照 allow |
+| read/read_file/glob/grep `..` 段（折叠后库内路径真实存在）三档两层缝 | `allow` | deny（原因含「下行路径」） |
+
+**MIN-1（Minor，不阻塞，留下一轮硬化波）：** `isSymlinkOrUnreadable` / `hasSymlinkSegment` 对非 ENOENT 的 lstat 错误（ENOTDIR/EACCES）也返回「符号链接」拒绝文案；方向 fail-closed 正确，仅模型-facing 原因失真。已登记 AGENTS.md 债务表。
+
+### 10.4 验证记录（主会话实跑，退出码显式落盘）
+
+| 验证项 | 结果 |
+| --- | --- |
+| 修复前 HEAD `7768438714` 完整 `corepack yarn check` | **GATE_EXIT=0**；Vitest 5786 passed / 15 skipped / 0 failed；15 node:test 套件 `# fail 0`（`/tmp/huaanwork-m1-2-merge-gate-7768438714.log`） |
+| 修复后聚焦 6 spec（tool-allow / org-isolation / policy.cordis / organizer / integration / org-tools） | **155 passed / 0 failed**（tool-allow 18 含 2 新） |
+| 修复后 `corepack yarn workspace dsh-plugin-huaanwork typecheck` | **退出码 0**（5 工程） |
+| 修复后完整 `corepack yarn check` | **GATE_EXIT=0**；Vitest **5788 passed / 15 skipped / 0 failed**（dsh-plugin-huaanwork 5041 = 5039+2）；15 node:test 套件 `# fail 0`（`/tmp/huaanwork-m1-2-imp1-gate.log`） |
+| 真机 / GUI / 打包应用整理槽观察 | **未执行**，边界不变（M1-3 / 发布验收） |
+
+**门禁通知异常记录：** 修复后门禁的首个后台完成通知为误报（当时日志 1761 行、无 `GATE_EXIT`、进程存活且日志增长）；以落盘标记 + 进程状态为准，Monitor 独立捕获 `GATE_EXIT=0` 后方采信。两次门禁均未与其它含 `verify:aa` 的命令并发。
+
+### 10.5 合并评估更新
+
+**Ready to merge：Yes。** IMP-1 闭环后 0 Critical / 0 Important 开放；MIN-1 与既有延后债务（M-1 / D-1 / D-2 / D-3、M-3/M-4/M-5、N-2、R-4）按原定里程碑承接：M1-3 接 `knowledge.organize*` / `knowledge.update` 路由前关闭 M-1 / D-1 / D-3，D-2 待规格裁定（建议净体积判定），R-4 归真机。真机验收边界不变，不以无头门禁替代。
