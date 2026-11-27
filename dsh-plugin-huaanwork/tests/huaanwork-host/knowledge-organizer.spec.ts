@@ -179,6 +179,8 @@ class FakeOrganizerHost {
   readonly openBatches = new Map<string, PendingOrganizeBatch>()
   readonly peekOverrides = new Map<string, PendingOrganizeBatch[]>()
   readonly openOverrides = new Map<string, PendingOrganizeBatch[]>()
+  /** 每次 peek 都抛出的注入错误（模拟删除/维护/存储关闭），清掉后才恢复正常。 */
+  readonly peekErrors = new Map<string, Error>()
   readonly phases = new Map<string, KnowledgeOrganizerPhase>()
   readonly phaseLog: PhaseLogEntry[] = []
   readonly failureCalls: FailureCall[] = []
@@ -248,6 +250,8 @@ class FakeOrganizerHost {
   }
 
   async peekPendingOrganizeBatch(kbId: string, nowMs: number): Promise<PendingOrganizeBatch> {
+    const injected = this.peekErrors.get(kbId)
+    if (injected !== undefined) throw injected
     const overrides = this.peekOverrides.get(kbId)
     if (overrides !== undefined && overrides.length > 0) return copyBatch(overrides.shift()!)
     return this.currentBatch(kbId, nowMs)
@@ -824,6 +828,56 @@ describe('single-slot lifecycle and inFlightOrganizeByKb', () => {
     expect(order.indexOf('done')).toBe(order.length - 1)
     expect(harness.releaseSlot).toHaveBeenCalledTimes(1)
   })
+
+  it('settles the round and drops every slot entry when peek rejects mid-round', async () => {
+    const harness = createHarness({
+      records: [
+        makeRecord('kb1', '空库'),
+        makeRecord('kb2', '删除中库'),
+        makeRecord('kb3', '正常库'),
+      ],
+    })
+    // 三个候选：kb1 空批先结算，kb2 在 peek 抛删除错误，kb3 是抛错之后才开始/占位的候选。
+    harness.host.setDocs('kb2', [{ docId: 'd2' }])
+    harness.host.setDocs('kb3', [{ docId: 'd3' }])
+    harness.host.markOrganized('kb3', 'd3')
+    harness.host.peekErrors.set(
+      'kb2',
+      new KnowledgeSyncError('knowledge-base-deleting', 'deleted during the round'),
+    )
+
+    const round = harness.organizer.scheduleEvaluate()
+    await waitForFollowup(harness, 1, 0)
+    resolveIdle(harness, 0)
+    await round
+
+    // 抛错候选不建 Agent、不写事件、不计次；其后的正常候选仍然完成。
+    expect(harness.createAgent).toHaveBeenCalledTimes(1)
+    expect(harness.host.attemptsFor('kb2', 'd2')).toBeUndefined()
+    expect(await eventsFor(harness, 'kb2')).toHaveLength(0)
+    expect((await eventsFor(harness, 'kb3')).map(event => event.kind)).toEqual([
+      'organize_started',
+      'organize_completed',
+    ])
+
+    // 两个库都必须从 inFlightOrganizeByKb 退场，后续等待与整轮评估才能结算。
+    await harness.organizer.waitForKbSlotIdle('kb2')
+    await harness.organizer.waitForKbSlotIdle('kb3')
+    await harness.organizer.scheduleEvaluate()
+
+    // 抛错消失后的再一轮必须能正常 create/followup。
+    harness.host.peekErrors.delete('kb2')
+    harness.host.markOrganized('kb2', 'd2')
+    const retry = harness.organizer.triggerManual('kb2')
+    await waitForFollowup(harness, 1, 1)
+    resolveIdle(harness, 1)
+    await retry
+    expect(harness.createAgent).toHaveBeenCalledTimes(2)
+    expect((await eventsFor(harness, 'kb2')).map(event => event.kind)).toEqual([
+      'organize_started',
+      'organize_completed',
+    ])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1049,7 +1103,7 @@ describe('failure counting rules', () => {
 // ---------------------------------------------------------------------------
 
 describe('sleep clock jump watchdog exemption', () => {
-  it('touch() resets the deps.now baseline so a 20 minute jump plus noteSystemResume does not time out', async () => {
+  it('touches the deps.now baseline only, so a 20 minute jump plus noteSystemResume does not time out', async () => {
     vi.useFakeTimers()
     const harness = createHarness({ timeoutMs: 600_000 })
     harness.host.setDocs('kb1', [{ docId: 'd1' }])
@@ -1058,7 +1112,7 @@ describe('sleep clock jump watchdog exemption', () => {
     const run = harness.organizer.triggerManual('kb1')
     await waitForFollowup(harness)
 
-    // 钉死顺序：只拨 deps.now，不推进 fake timer；noteSystemResume 重设基准；再推进不足 timeout。
+    // 钉死顺序：只拨 deps.now（不推进 fake timer）→ noteSystemResume 重设基准 → 再推进不足 timeout。
     harness.clock.now += 20 * 60_000
     harness.organizer.noteSystemResume()
     await vi.advanceTimersByTimeAsync(9 * 60_000)
@@ -1070,7 +1124,7 @@ describe('sleep clock jump watchdog exemption', () => {
     expect((await eventsFor(harness)).map(event => event.kind)).toEqual(['organize_started', 'organize_completed'])
   })
 
-  it('the same clock jump without noteSystemResume times out when the fake timer wakes', async () => {
+  it('times out at the timer wake when the same jump skips noteSystemResume', async () => {
     vi.useFakeTimers()
     const harness = createHarness({ timeoutMs: 600_000 })
     harness.host.setDocs('kb1', [{ docId: 'd1' }])
@@ -1082,6 +1136,35 @@ describe('sleep clock jump watchdog exemption', () => {
     await vi.advanceTimersByTimeAsync(600_000)
     await run
 
+    expect(harness.agents[0]?.cancel).toHaveBeenCalledWith({
+      kind: 'hook',
+      reason: 'knowledge-organize-idle-timeout',
+    })
+    expect(harness.host.failureCalls).toHaveLength(1)
+    expect(harness.host.failureCalls[0]?.error).toBe('knowledge-organize-idle-timeout')
+  })
+
+  it('re-arms instead of timing out when only the fake timer advances past timeoutMs', async () => {
+    vi.useFakeTimers()
+    const harness = createHarness({ timeoutMs: 600_000 })
+    harness.host.setDocs('kb1', [{ docId: 'd1' }])
+
+    const run = harness.organizer.triggerManual('kb1')
+    await waitForFollowup(harness)
+
+    // 纯定时器实现会在第一次唤醒就拒绝；正确实现唤醒后比较 deps.now()，未超时按剩余时间重新武装。
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(harness.agents[0]?.cancel).not.toHaveBeenCalled()
+    expect(harness.host.failureCalls).toHaveLength(0)
+    // 第二次唤醒同样未超时，证明重新武装的定时器仍然存活且每次都走基准比较。
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(harness.agents[0]?.cancel).not.toHaveBeenCalled()
+    expect(harness.host.failureCalls).toHaveLength(0)
+
+    // 重新武装的定时器必须保持有效：deps.now 也越过超时后，下一次唤醒拒绝并计次。
+    harness.clock.now += 600_000
+    await vi.advanceTimersByTimeAsync(600_000)
+    await run
     expect(harness.agents[0]?.cancel).toHaveBeenCalledWith({
       kind: 'hook',
       reason: 'knowledge-organize-idle-timeout',

@@ -668,6 +668,9 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
       recordTerminal(error)
       nextAction.scheduleNext = locals.admitted && cancelReasonByKb.get(kbId) === undefined
     } finally {
+      // 准入必须每条路径都兑现：peek/open/admission 等预启动步骤抛错时，
+      // scheduleEvaluate 仍要拿到结果并继续处理本轮其余候选，绝不悬挂等待。
+      finishAdmission(locals.admitted)
       locals.idleDeadline?.dispose()
       if (activeIdleDeadline === locals.idleDeadline) activeIdleDeadline = undefined
 
@@ -747,6 +750,8 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
       } catch {
         // runCandidate 已自行结算；显式兜底保证 lifecycle 一定兑现。
       } finally {
+        // runCandidate 在进入自身 finally 前任何异常也必须兑现准入，避免评估轮悬挂与槽位泄漏。
+        claim.resolveAdmitted(false)
         if (inFlightOrganizeByKb.get(claim.record.id) === claim.lifecycle) {
           inFlightOrganizeByKb.delete(claim.record.id)
         }
