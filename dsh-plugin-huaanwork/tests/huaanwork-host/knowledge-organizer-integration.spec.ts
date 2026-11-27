@@ -40,6 +40,7 @@ import type { SyncWatchFactory, SyncWatcherHandle } from '../../src/huaanwork-ho
 import type { KnowledgeBaseRecord, PendingOrganizeBatch } from '../../src/huaanwork-host/knowledge/types.ts'
 import type { RouteContext } from '../../src/huaanwork-host/routes.ts'
 import {
+  drainUserQueue,
   releaseAndDrain,
   setReevaluateKbOrganize,
   type SessionRuntimeContext,
@@ -1323,6 +1324,68 @@ describe('index.ts knowledge effect wiring', () => {
       expect(registeredKnowledgeBaseIds().size).toBe(0)
     } finally {
       await booted.ctx.fiber.dispose()
+    }
+  }, 30_000)
+
+  it('registers the kb_org_* tools and the post-drain organizer re-evaluation in the real apply()', async () => {
+    const root = makeRoot('kb-org-integration-apply-wiring-')
+    const config = hostConfig(root)
+    const bootSourceDir = join(root, 'source')
+    mkdirSync(bootSourceDir, { recursive: true })
+    writeFileSync(join(bootSourceDir, 'alpha.md'), '# Alpha\n\n接线断言。\n')
+    const registered: Array<{ name: string }> = []
+    const booted = await bootHuaanworkHost(config)
+    // tools 服务后提供:注册子插件随之激活,与生产启动顺序无关(与 agent-tool-wiring 同法)。
+    const disposeTools = booted.ctx.provide('tools', {
+      register(definition: { name: string }) {
+        registered.push(definition)
+        return () => {
+          const index = registered.indexOf(definition)
+          if (index >= 0) registered.splice(index, 1)
+        }
+      },
+    } as never)
+    const waitForTool = async (name: string, present: boolean): Promise<void> => {
+      await vi.waitFor(
+        () => expect(registered.some(tool => tool.name === name)).toBe(present),
+        { timeout: 5_000 },
+      )
+    }
+    try {
+      // (a) 生产 apply() 必须把三个整理工具真正注册进 tools 服务。
+      for (const name of ['kb_org_get_delta', 'kb_org_read_doc', 'kb_org_mark_organized']) {
+        await waitForTool(name, true)
+      }
+
+      // (b) 用户队列排空 → setReevaluateKbOrganize → organizer.scheduleEvaluate。
+      const host = getKnowledgeHost()
+      expect(host).toBeDefined()
+      const record = await host!.create({ name: '接线库', sourceDir: bootSourceDir })
+      await vi.waitFor(
+        () => expect(host!.get(record.id)?.phase).toBe('blocked-no-model'),
+        { timeout: 15_000 },
+      )
+      // 等 create/sync 的自动评估链彻底静默,之后的评估只能来自排空钩子。
+      await new Promise(resolve => setTimeout(resolve, 100))
+      const candidatesSpy = vi.spyOn(host!, 'listOrganizeCandidates')
+      const peekSpy = vi.spyOn(host!, 'peekPendingOrganizeBatch')
+
+      // 队列为空:drainUserQueue 不启动任何用户回合,只走两次重评估。
+      drainUserQueue(booted.ctx as unknown as SessionRuntimeContext, {} as RouteContext)
+
+      // 真实 effect 级断言:评估真的跑到了这个库(列候选 + peek 批次)。
+      await vi.waitFor(() => expect(candidatesSpy.mock.calls.length).toBeGreaterThan(0))
+      await vi.waitFor(() => expect(peekSpy.mock.calls.length).toBeGreaterThan(0))
+      expect(peekSpy.mock.calls[0]?.[0]).toBe(record.id)
+      // 模型仍缺失:评估停在 blocked-no-model,不创建 Agent、不占名额。
+      expect(host!.get(record.id)?.phase).toBe('blocked-no-model')
+    } finally {
+      await disposeTools()
+      await booted.ctx.fiber.dispose()
+    }
+    // fiber 退场后不留悬挂工具行。
+    for (const name of ['kb_org_get_delta', 'kb_org_read_doc', 'kb_org_mark_organized']) {
+      expect(registered.some(tool => tool.name === name)).toBe(false)
     }
   }, 30_000)
 })

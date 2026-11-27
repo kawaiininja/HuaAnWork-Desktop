@@ -382,6 +382,7 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
 
     const organized = new Set(settlement.organizedDocIds)
     const unmarked = settlement.batch.docs.filter(doc => !organized.has(doc.docId))
+    let failureWriteFailed = false
     if (!cancelled) {
       // 文档级 retry_after 不另设计时器：到期后的再评估由周期对账
       // （DEFAULT_RECONCILE_INTERVAL_MS）与排空后的 reevaluateKbOrganize 触发；
@@ -395,8 +396,16 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
             terminalError ?? UNMARKED,
             deps.now(),
           )
-        } catch {
-          // 单文档计次失败不阻断其它文档与后续清理；批次事件仍按首次终止原因结算。
+        } catch (error) {
+          // 单个文档计次失败不阻断其余文档与后续清理；但写侧持续失败（磁盘满/只读）
+          // 时读侧仍返回同一批文档，立即续跑等于每轮白烧一个模型回合并绕过 1/5/3
+          // 退避，故本轮停止自动重试，交给周期对账或下一次手动触发，只告警一次。
+          if (!failureWriteFailed) {
+            console.warn(
+              `[knowledge] organize failure write failed for ${kbId}; pausing auto-organize until the next evaluation: ${String(error)}`,
+            )
+          }
+          failureWriteFailed = true
         }
       }
     }
@@ -442,6 +451,8 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
         }
       }
     }
+    // 计次未落盘时同一批文档会立刻被重新 peek，必须停止自动续跑（见上）。
+    if (failureWriteFailed) return { cancelled, scheduleNext: false }
     return { cancelled, scheduleNext: !cancelled }
   }
 
@@ -808,13 +819,15 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
   ): Promise<void> {
     // 第一件事：在任何 reset、计时器或候选集副作用之前完成同步校验。
     deps.host.assertOrganizeAllowed(kbId)
+    // 在途批次（例如纯墓碑零进展批）的结算会在清零之后重新 +1 并挂 60s/300s 退避，
+    // 从而把随后的评估挡回；必须先等它彻底结算，再清计数与计时器。
+    await waitForKbSlotIdle(kbId)
     if (opts?.docId !== undefined) {
       await deps.host.resetOrganizeFailures(kbId, opts.docId)
     } else if (opts?.retryFailed === true) {
       await deps.host.resetOrganizeFailures(kbId)
     }
     clearZeroProgress(kbId)
-    await waitForKbSlotIdle(kbId)
     await scheduleEvaluate({ manualKbIds: [kbId] })
   }
 

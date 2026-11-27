@@ -973,6 +973,42 @@ describe('failure counting rules', () => {
     expect(harness.createAgent).toHaveBeenCalledTimes(3)
   })
 
+  it('stops auto-retry when recordOrganizeFailure keeps rejecting and settles the failed batch once', async () => {
+    const harness = createHarness()
+    harness.host.setDocs('kb1', [{ docId: 'd1' }])
+    const peekSpy = vi.spyOn(harness.host, 'peekPendingOrganizeBatch')
+    const failureSpy = vi
+      .spyOn(harness.host, 'recordOrganizeFailure')
+      .mockRejectedValue(new Error('SQLITE_FULL: database or disk is full'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const run = harness.organizer.triggerManual('kb1')
+      await waitForFollowup(harness)
+      resolveIdle(harness)
+      await run
+
+      expect(failureSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls.map(call => String(call[0])).some(
+        message => message.includes('kb1') && message.includes('SQLITE_FULL'),
+      )).toBe(true)
+      expect((await eventsFor(harness)).map(event => event.kind)).toEqual([
+        'organize_started',
+        'organize_failed',
+      ])
+
+      // 计次落盘失败后同一文档仍在待整理批次里:本轮不得立刻再烧一个模型回合,
+      // 也不得把全局名额留在占用状态(交给周期对账重试)。
+      expect(harness.scheduler.activeTurnCount()).toBe(0)
+      expect(harness.scheduler.activeSessionIds().has(kbOrganizeSessionId('kb1'))).toBe(false)
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(peekSpy).toHaveBeenCalledTimes(1)
+      expect(harness.createAgent).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('does not increment attempts for preempt, user-stop, maintenance, or dispose cancellations', async () => {
     const reasons = ['preempt', 'user-stop', 'maintenance', 'dispose'] as const
     for (const reason of reasons) {
@@ -1436,6 +1472,27 @@ describe('pure-tombstone zero-progress backoff', () => {
     resolveIdle(tombstoneHarness, 1)
     await tombstoneSecond
     expect(tombstoneHarness.agents[1]?.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('manual trigger during an in-flight pure-tombstone batch survives the re-armed backoff', async () => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    harness.host.setTombstones('kb1', [{ docId: 't1' }])
+
+    const first = harness.organizer.triggerManual('kb1')
+    await waitForFollowup(harness)
+    // 在途批次尚未结算:零进展 +1 与 60s 退避都将在它的 settle 里发生。
+    const manual = harness.organizer.triggerManual('kb1')
+
+    resolveIdle(harness)
+    await first
+
+    // 手动触发必须等到在途批次结算,再清掉刚挂上的退避并真的重新整理。
+    await vi.waitFor(() => expect(harness.createAgent).toHaveBeenCalledTimes(2))
+    await waitForFollowup(harness, 1, 1)
+
+    resolveIdle(harness, 1)
+    await manual
   })
 
   it('triggerManual cancels the backoff timer and re-evaluates without waiting', async () => {
