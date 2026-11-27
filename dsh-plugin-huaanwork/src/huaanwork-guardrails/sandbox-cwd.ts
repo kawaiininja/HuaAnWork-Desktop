@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
+import { isKbOrganizeSessionId } from "../huaanwork-host/knowledge/session-ids.ts";
 
 type SessionMeta = {
   cwd?: string;
@@ -55,8 +56,11 @@ export function apply(ctx: Context): void {
 
   const resolvePolicy = ctx.sandboxPolicy.resolve.bind(ctx.sandboxPolicy);
   ctx.sandboxPolicy.resolve = (request) => {
-    const resolved = resolvePolicy(request);
     const header = request?.session?.header;
+    // 整理槽的根只来自 `huaanworkSessionRoots` 的本会话条目:缺根直接失败,
+    // 不认父会话继承,也绝不回落 `huaanworkWorkspaceRoot.current` / 已解析 cwd。
+    assertOrganizerRoot(ctx.huaanworkSessionRoots, header?.id);
+    const resolved = resolvePolicy(request);
     const allowedRoot = sessionRootFromHeader(ctx, header);
     return { ...resolved, workspaceRoot: pinnedCwd(ctx, header?.cwd, allowedRoot) };
   };
@@ -90,14 +94,31 @@ function withPinnedCwd(
   sessionId?: string,
   options?: SessionOptions,
 ): SessionOptions {
+  const roots = ctx.huaanworkSessionRoots;
+  // 缺根检查必须先于 persistence 早退:整理槽没有登记根时,持久化恢复同样 fail closed,
+  // 绝不把前台工作区当成整理会话的写边界。
+  assertOrganizerRoot(roots, sessionId);
   // Persistence resume already has a durable log keyed by header.cwd. Rewriting
   // cwd here makes jsonl look for a file under the new project directory.
   if (options?.seedSource === "persistence") return options;
-  const roots = ctx.huaanworkSessionRoots;
   // 根表没有这个会话时保持前台夹紧，避免尚未接线的调用突然放开。
   const allowedRoot = rootOf(roots, sessionId) ?? rootOf(roots, options?.meta?.parentSession);
   const cwd = pinnedCwd(ctx, options?.meta?.cwd, allowedRoot);
   return { ...options, meta: { ...options?.meta, cwd } };
+}
+
+/**
+ * 整理槽缺少本会话登记根时立即抛错(规格 §5.3 第 2 条)。
+ * 只看 `roots` 的直接条目:父会话根不能继承给整理槽,前台根更不行。
+ */
+function assertOrganizerRoot(
+  roots: Map<string, string> | undefined,
+  sessionId: string | undefined,
+): void {
+  if (!isKbOrganizeSessionId(sessionId)) return;
+  if (rootOf(roots, sessionId) === undefined) {
+    throw new Error(`knowledge-organize-root-missing: ${sessionId}`);
+  }
 }
 
 /** 允许根查找顺序：`header.id` → 登记过的父会话 → `header.parentSession`。 */
@@ -124,6 +145,8 @@ export function sessionWorkspaceRoot(
   sessionId?: string,
 ): string {
   const roots = ctx.huaanworkSessionRoots;
+  // 整理槽只认本会话登记根:缺根 fail closed,不沿父会话或前台根回落。
+  assertOrganizerRoot(roots, sessionId);
   const direct = rootOf(roots, sessionId);
   if (direct) return direct;
   const parent = sessionId ? parentSessionOf(sessionId) : undefined;

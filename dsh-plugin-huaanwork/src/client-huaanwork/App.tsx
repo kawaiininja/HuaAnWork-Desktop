@@ -160,6 +160,7 @@ import {
   hasBufferedQueueStartForSession,
   historyItemsFromRecords,
   isAutomationSessionId,
+  isKbOrganizeSessionId,
   RESULT_PRESENT_FAILURE_NOTE,
   RESULT_PRESENT_TOOL,
   takeEarlyPendingEvents,
@@ -2308,6 +2309,8 @@ export default function App() {
           const eventSessionId = "sessionId" in event ? event.sessionId : undefined;
           const boundTab = boundTabFor(eventSessionId);
           if (typeof eventSessionId === "string" && isAutomationSessionId(eventSessionId) && !boundTab) return;
+          // 知识库整理槽不是用户会话:它的事件(token/tool/diff/session-end)永不写入对话流。
+          if (typeof eventSessionId === "string" && isKbOrganizeSessionId(eventSessionId)) return;
           // 运行期间其余非用户会话事件（子代理、旧 sidecar 无归因事件）维持抑制；
           // 用户自身会话（huaanwork-chat- / huaanwork-<digest>）与绑定运行标签的事件照常渲染，
           // 并发 Chat 回合不再被全局布尔误伤（「运行中看直播」的路由前提）。

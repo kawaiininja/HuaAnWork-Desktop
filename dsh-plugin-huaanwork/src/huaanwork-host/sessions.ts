@@ -62,11 +62,12 @@ import {
 import type { ExpertTeamStore } from './expert-team/types.ts'
 import { disposeExpertTeamObservers } from './expert-team/observer.ts'
 import type { ExpertTeamCoordinator } from './expert-team/coordinator.ts'
+import { isKbOrganizeSessionId } from './knowledge/session-ids.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { resolveSessionModel } from './session-models.ts'
 import { listProjects, listTasks, setTaskModel } from './stores.ts'
 import type { QueueItem, TurnScheduler } from './turn-scheduler.ts'
-import { writableRootForSession } from './writable-root.ts'
+import { registeredKnowledgeBaseIds, writableRootForSession } from './writable-root.ts'
 import {
   assertSafePathSegment,
   neutralSessionRoot,
@@ -712,6 +713,7 @@ async function ensureChannelAgent(
       projects,
       tasks,
       headerCwd: typeof persisted?.cwd === 'string' ? persisted.cwd : undefined,
+      registeredKbIds: registeredKnowledgeBaseIds(),
     })
   }
   // 推导（含其中的磁盘读取）之后、写根与 create / resume 之前的最后一次取消与登记根复查。
@@ -1100,9 +1102,10 @@ function objectAtKind(params: unknown): 'expert-team' | undefined {
  */
 export { resolveFollowupClientMessageId }
 
-/** 会话来源:自动化运行会话(`huaanwork-auto-` 前缀)为 `'automation'`,其余为 `'advanced'`。 */
-export function turnOriginForSession(sessionId: string): 'automation' | 'advanced' {
-  return sessionId.startsWith(AUTO_SESSION_PREFIX) ? 'automation' : 'advanced'
+/** 会话来源:整理槽(`huaanwork-kb-org-`)为 `'knowledge'`,自动化运行会话(`huaanwork-auto-`)为 `'automation'`,其余为 `'advanced'`。 */
+export function turnOriginForSession(sessionId: string): 'automation' | 'knowledge' | 'advanced' {
+  if (sessionId.startsWith(AUTO_SESSION_PREFIX)) return 'automation'
+  return isKbOrganizeSessionId(sessionId) ? 'knowledge' : 'advanced'
 }
 
 /**
@@ -1398,6 +1401,7 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
       projects,
       tasks,
       headerCwd: typeof header?.cwd === 'string' ? header.cwd : undefined,
+      registeredKbIds: registeredKnowledgeBaseIds(),
     })
   }
   if (!existsSync(root) || !statSync(root).isDirectory()) {
@@ -1479,7 +1483,10 @@ export function sessionCancel(ctx: SessionRuntimeContext, routeCtx: RouteContext
 
 export async function sessionList(routeCtx: RouteContext, root: string | undefined): Promise<SessionSummary[]> {
   const sessions = await listSessions(join(routeCtx.dshHome, 'sessions'))
-  const topLevel = sessions.filter((session) => session.origin !== 'subagent' && !session.parentSession)
+  // 整理槽不是用户会话:侧栏列表永不展示(与子代理日志同一层级过滤)。
+  const topLevel = sessions.filter(
+    (session) => session.origin !== 'subagent' && !session.parentSession && !isKbOrganizeSessionId(session.id),
+  )
   return root ? topLevel.filter((session) => sessionWithinRoot(session, root)) : topLevel
 }
 

@@ -14,6 +14,16 @@ export const AUTO_SESSION_PREFIX = "huaanwork-auto-";
  * sidecar 启动时一次性清扫删除该前缀目录，这里仅过滤清扫失败（如 Windows 文件占用）的残留。
  */
 export const LEGACY_CHAT_AUTO_SESSION_PREFIX = "huaanwork-chat-auto-";
+/**
+ * 知识库整理槽会话 id 前缀（每库固定单槽 `huaanwork-kb-org-<kbId>`）。
+ * 客户端与宿主进程隔离, 保持独立声明; 值与 src/huaanwork-host/knowledge/session-ids.ts 保持同步。
+ */
+export const KB_ORG_SESSION_PREFIX = "huaanwork-kb-org-";
+
+/** 知识库整理槽会话不是用户会话:不进侧栏,也不写进任何对话标签的事件流。 */
+export function isKbOrganizeSessionId(id: string | undefined): boolean {
+  return typeof id === "string" && id.startsWith(KB_ORG_SESSION_PREFIX);
+}
 
 /**
  * 自动化运行会话不进侧栏常规会话列表——它们由「任务」区运行 tab 与「自动化」页「运行记录」展示。
@@ -60,7 +70,7 @@ type ProjectLike = { id: string; root: string };
 /**
  * 未归属任何项目的会话（中立工作区的游离对话）：cwd 不落在任何已登记项目根内。
  * 项目分组已退役（规格 §4.1）——项目会话全部收编进子任务，项目卡不再列 cwd 会话。
- * 自动化运行会话与空壳会话在此剔除，返回值可直接渲染。
+ * 自动化运行会话、知识库整理槽与空壳会话在此剔除，返回值可直接渲染。
  */
 export function unscopedSessions<S extends SessionLike, P extends ProjectLike>(
   sessions: readonly S[],
@@ -70,6 +80,7 @@ export function unscopedSessions<S extends SessionLike, P extends ProjectLike>(
     (session) =>
       sessionHasContent(session) &&
       !isAutomationSessionId(session.id) &&
+      !isKbOrganizeSessionId(session.id) &&
       !projects.some((project) => cwdWithinRoot(session.cwd, project.root)),
   );
 }
@@ -123,12 +134,14 @@ export type HistoryChatItem =
       callId?: string;
       args?: string;
       command?: string;
-      output?: string;
+      // 可选字段显式接受 `undefined`:历史归并会用「设为 undefined」清掉上一状态
+      // (例如中断标记),宿主侧 tsconfig.tests.json 的 exactOptionalPropertyTypes 需要此声明。
+      output?: string | undefined;
       hasResult: boolean;
-      resultMissing?: boolean;
-      interrupted?: boolean;
-      truncated?: boolean;
-      isError?: boolean;
+      resultMissing?: boolean | undefined;
+      interrupted?: boolean | undefined;
+      truncated?: boolean | undefined;
+      isError?: boolean | undefined;
       roundKey?: number;
     }
   | { kind: "note"; text: string };
