@@ -300,3 +300,32 @@ I-1 按原评审首选的快照方案落地并封住异常路径，M-2 在两层
 | **D-3** | `autoOrganize` 从 `false → true` 未主动触发整理排期 | `host.ts:547, 640-644`；`sync-engine.ts:408-413, 1833-1852` | `host.update` 的 `finally` 仅在 `rebindSucceeded && updateSucceeded` 时调 `notifyOrganizerPending(kbId)`。**重要纠偏**：`sync-engine.ts` 的周期对账经 `canRunBackgroundSync` 跳过 `watchPaused=true` 的库，而 `watchPaused=true` 不阻断阶段 2 整理（`host.ts:766-779`），因此「靠 ≤300s 周期对账兜底」**仅在 `!watchPaused` 时成立**；暂停监听下打开自动整理无周期兜底，且未暂停监听时用户打开开关干等最多 5 分钟也反直觉。**处置**：M1-3 接入 `knowledge.update` 路由与前端开关时**必须**补齐 `autoOrganize: false → true` 后的 `notifyOrganizerPending(kbId)` 及回归测试。 |
 
 其余代码评审残余沿用 §三、§六、§七 记录：M-1（已裁定，M1-3 接 `knowledge.organizeCancel` 前必落）、M-3/M-4/M-5、N-2（超大 `automation_timeout_ms` 截断上限）及计划评审 R-4（真机休眠唤醒先后时序）。
+
+---
+
+## 九、全面质检校准与补修记录（2026-11-27）
+
+> 本节记录对分支 `feat/knowledge-base-m1-2-single-slot-organizer`（基线 `285d5215ff`）全量源码质检新发现 3 项（Q-M1、Q-N1、Q-N2）的反证校准、补修提交（`34cd621246`）与完整无头门禁复验。§一～§八原文保持不动。
+
+### 9.1 反证校准结论
+
+| 编号 | 校准结果 | 源码与上游反证依据 | 补修落点（`34cd621246`） |
+| :--- | :--- | :--- | :--- |
+| **Q-M1** | **属实（Minor）**；修法落点校准 | 上游 `deepseek-harness/packages/core/agent-loop/src/inbox.ts:112` 在 `followup()` 认领时必发 `agent/inbox/claimed`；`makeResultPresentClaimed`（`result-artifact-tools.ts:228`）与 `makeExpertTeamClaimed`（`expert-team-dispatch.ts:224`）均直接调用 `turnAnchors.notePreStep`，绕过 `installTurnAnchorHooks` 写入 256 条 LRU，且 `session/disposed` 跳过整理槽清理导致常驻占槽。**落点校准**：不能直接在 `createTurnAnchorStore` 内拦整理槽，否则破坏既有 `TurnAnchor['origin'] = 'knowledge'` 契约测试（`knowledge-org-isolation.spec.ts:221-226`）。 | 在 `makeResultPresentClaimed` 与 `makeExpertTeamClaimed` 对 `isKbOrganizeSessionId(sessionId)` 跳过 `notePreStep`，同时保留 `wantAttached = false` 的 fail-closed 附件摘除语义。 |
+| **Q-N1** | **属实，且严重度升格（Nit → Minor）** | 上游 `deepseek-harness/packages/core/agent-loop/src/agent.ts:368-374` 证实：`limits.ts:123` 调用 `agent.cancel({ kind: 'parent' })` 命中 `abortedCancelCause` 后直接 `throw error`、**不调用 `this.throwError()`、不发 `agent/error`**，`kick()` 吞掉异常后 `whenIdle()` 正常 resolve。此前以为 `agent/error` 会补回错误并不成立：不仅宿主侧经 `huaanworkEmit` 外泄多余 `session/end`（仅客户端 `App.tsx:2316` 兜底），更会在「本批文档已 mark 完、后续改写索引连续 3 次同参失败被强杀」时因缺失 `firstModelError` 误结算为 `organize_completed`，或丢失真实中止原因。 | `limits.ts` 的 `emitStop` 识别 `isKbOrganizeSessionId(sessionId)` 后不发 `huaanworkEmit`，改为直接调用 `noteKnowledgeOrganizerError(sessionId, reason)`。 |
+| **Q-N2** | **属实（Nit · 策略层纵深加固）** | ① `wiki/` 内存在悬空目录符号链接（`wiki/sub -> outside/missing-dir`）时，写入 `sub/escape.md` 在 `policy.ts` 叶 `lstatSync` 得 `ENOENT` 放行，在 `paths.ts` `resolveInside` 因 `existsSync` 越过悬空段退回 `wiki/` 返回 `allow`（尽管 POSIX `fs-local` `mkdir` 随后报 `EEXIST` 不致越界写）；② macOS 下 `tmpdir()` 为 `/var/folders/...` 而 `realpath` 为 `/private/var/folders/...`，访问规范临时路径未命中 `REASON_ORGANIZER_TEMP`（由 `decide.ts` 拒为 `REASON_PATH_ESCAPE`），且规范库根配原始 tmpdir 前缀的库内路径会被误拒为临时目录。 | `policy.ts` 的 `organizerWriteDenial`：① 对 `tmpdir()` 与 `root` 做规范别名对齐（不跟随 `wiki/` 内链接）；② 对库内目标自 `root` 向下逐段 `lstatSync` 拦截中间悬空目录链接与叶链接。 |
+
+### 9.2 回归测试（先红后绿）与门禁复验
+
+四条新增判别性测试均先观察到预期失败，再随 `34cd621246` 全部转绿：
+
+| 新增测试 | 修复前（实跑 RED） | 修复后（实跑 GREEN） |
+| :--- | :--- | :--- |
+| `knowledge-org-isolation.spec.ts`「agent/inbox/claimed handlers skip turnAnchors LRU writes…」 | `notePreStep` 对 `huaanwork-kb-org-kb1` 被调 2 次，整理槽写入 LRU | `notePreStep` 0 调用、`current(ORG_SESSION) === undefined`，`s1` 不被淘汰，双附件仍 fail-closed 摘除 |
+| `knowledge-org-isolation.spec.ts`「limits routes organizer repeated-failure stops…」 | 经 `huaanworkEmit` 发出 `session/end`，`orgErrors` 为空 | `emitted === []`、`orgErrors === ['same tool and key args failed 3 times']`；正对照普通用户仍发 `session/end` |
+| `knowledge-tool-allow.spec.ts`「cannot write through a dangling directory symlink…」 | `write ask pre-execute` 返回 `allow` | `ask`/`smart`/`full` 下 `write`/`edit` 在两层缝均返回 `deny`（原因含 `符号链接`） |
+| `knowledge-tool-allow.spec.ts`「aligns canonical tmpdir aliases without false-denying…」 | 规范 tmpdir 路径落入 `路径越出当前工作区` 而非 `临时目录` | 规范 tmpdir 库外路径在两层缝命中 `临时目录`；`realWiki` + raw tmpdir 库内路径放行 |
+
+- **聚焦复验：** 8 个相关 spec（`knowledge-org-isolation` 19、`knowledge-tool-allow` 16、`policy.cordis` 36、`limits-goal` 2、`result-artifact-tools` 22、`expert-team-dispatch` 11、`knowledge-organizer` 49、`knowledge-organizer-integration` 23）共 **178 passed / 0 failed**；`corepack yarn workspace dsh-plugin-huaanwork typecheck`（5 工程）退出码 0；`git diff --check` 与 `node scripts/check-whitespace.mjs` 退出码 0。
+- **完整门禁：** 独立执行 `corepack yarn check`（输出重定向显式记录退出码）→ **`GATE_EXIT=0`**；全仓 Vitest **5786 passed / 15 skipped / 0 failed**（`dsh-plugin-huaanwork` 5039 passed，较 §6.3 的 5782 正好 +4），全部 15 个 `node:test` 套件 `# fail 0`，`verify-layout` / `verify-runtime-closure`（316 nodes）/ `verify-bundled-runtime`（150 files）/ `verify-profile-boot` ×2 / `verify-licenses` / `verify-operation-reliability` 全部通过。
+- **合并评估：** **Ready to merge（Yes）。** Q-M1、Q-N1、Q-N2 全部闭环；剩余 M-1、D-1、D-2、D-3、M-3/M-4/M-5、N-2 及真机项 R-4 均已落盘并按原定里程碑边界承接。
