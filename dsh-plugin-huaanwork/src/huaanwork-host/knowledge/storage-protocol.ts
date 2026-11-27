@@ -88,6 +88,7 @@ export type StorageWorkerRequest =
   | { readonly id: number; readonly op: 'recordOrganizeFailure'; readonly kbId: string; readonly docId: string; readonly sha256: string; readonly error: string; readonly nowMs: number }
   | { readonly id: number; readonly op: 'resetOrganizeFailures'; readonly kbId: string; readonly docId?: string }
   | { readonly id: number; readonly op: 'markOrganizedAtomic'; readonly kbId: string; readonly docId: string; readonly sha256: string; readonly wikiNotePath: string; readonly clearedTombstones?: readonly string[] }
+  | { readonly id: number; readonly op: 'clearOrganizeTombstones'; readonly kbId: string; readonly docIds: readonly string[] }
   | { readonly id: number; readonly op: 'getPendingOrganizeBatch'; readonly kbId: string; readonly nowMs: number; readonly maxDocs?: number; readonly maxBytes?: number }
   | { readonly id: number; readonly op: 'getDocChunks'; readonly kbId: string; readonly docId: string; readonly startOrdinal: number; readonly limit: number }
   | { readonly id: number; readonly op: 'getStats'; readonly kbId: string }
@@ -114,6 +115,7 @@ export interface StorageResultMap {
   readonly recordOrganizeFailure: { readonly attempts: number; readonly retryAfter: number | null }
   readonly resetOrganizeFailures: void
   readonly markOrganizedAtomic: { readonly updated: boolean }
+  readonly clearOrganizeTombstones: readonly string[]
   readonly getPendingOrganizeBatch: PendingOrganizeBatch
   readonly getDocChunks: readonly ChunkWindowItem[]
   readonly getStats: KnowledgeBaseStats

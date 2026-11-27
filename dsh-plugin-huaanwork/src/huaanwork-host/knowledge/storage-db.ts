@@ -1139,6 +1139,23 @@ export function markOrganizedAtomic(db: DatabaseSync, input: MarkOrganizedInput)
 }
 
 /**
+ * 清除整理墓碑行(规格 §8.1 / Task 3 纯墓碑批):只在一个事务里逐 id 删行,
+ * 返回实际删除(命中行)的 docId。Worker/db 层绝不接触 Wiki 文件——卡片删除
+ * 只发生在 Host 工具层校验通过之后。
+ */
+export function clearOrganizeTombstones(db: DatabaseSync, docIds: readonly string[]): readonly string[] {
+  return inImmediateTransaction(db, () => {
+    const remove = db.prepare('DELETE FROM organize_tombstones WHERE doc_id = ?')
+    const deleted: string[] = []
+    for (const docId of docIds) {
+      const changes = remove.run(docId)
+      if (Number(changes.changes) > 0) deleted.push(docId)
+    }
+    return deleted
+  })
+}
+
+/**
  * 下一批待整理文档（规格 §8.1/§8.2）：跳过未到退避时间或已 3 次失败的，
  * 每批最多 10 份或 80 KB 切片文本，并随批返回全部删除墓碑。
  */

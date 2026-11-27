@@ -48,6 +48,7 @@ import { configureSkillCatalog } from './skill-catalog-client.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
 import { clearPendingWorkspaceRoot, neutralAutomationsBaseDir, neutralKnowledgeBaseDir, neutralSessionsBaseDir, neutralWorkspaceRoot } from './workspace-state.ts'
 import { createKnowledgeHost } from './knowledge/host.ts'
+import { registerKnowledgeOrgTools } from './knowledge/org-tools.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
 import {
   registerAgentPackageCreationTools,
@@ -521,12 +522,17 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         const unregisterResultArtifactTools = registerResultArtifactTools(toolCtx, config.profileDir)
         // 团长派工工具全局注册;只有团队回合经 claimed 附件与租约获得模型面。
         const unregisterExpertTeamDispatch = registerExpertTeamDispatchTool(toolCtx)
+        // 知识库整理工具全局注册;作用域由整理槽会话前缀与 policy 白名单锁定,
+        // 执行时经 getKnowledgeHost() 取同一知识库宿主(Task 6 完成接线)。
+        const unregisterKnowledgeOrgTools = registerKnowledgeOrgTools(toolCtx)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         }
         return () => {
-          // 先注销团长派工工具:随后的团队取消期间不得再有新的工具调用进入。
+          // 先注销知识库整理工具:knowledge effect 随后才 dispose host,工具不得晚于宿主退出。
+          unregisterKnowledgeOrgTools()
+          // 再注销团长派工工具:随后的团队取消期间不得再有新的工具调用进入。
           unregisterExpertTeamDispatch()
           syncHostToolDescription = undefined
           // 先注销创建工具再清空门面:卸载后不能再有持有门面的工具在途。

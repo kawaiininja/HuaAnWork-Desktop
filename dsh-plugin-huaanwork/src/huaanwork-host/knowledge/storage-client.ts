@@ -68,6 +68,7 @@ export interface KnowledgeStorageClient {
   recordOrganizeFailure(kbId: string, docId: string, sha256: string, error: string, nowMs: number): Promise<StorageResultMap['recordOrganizeFailure']>
   resetOrganizeFailures(kbId: string, docId?: string): Promise<void>
   markOrganizedAtomic(kbId: string, docId: string, sha256: string, wikiNotePath: string, clearedTombstones?: readonly string[]): Promise<StorageResultMap['markOrganizedAtomic']>
+  clearOrganizeTombstones(kbId: string, docIds: readonly string[]): Promise<readonly string[]>
   getPendingOrganizeBatch(kbId: string, nowMs: number, opts?: { maxDocs?: number; maxBytes?: number }): Promise<PendingOrganizeBatch>
   getDocChunks(kbId: string, docId: string, startOrdinal: number, limit: number): Promise<readonly ChunkWindowItem[]>
   getStats(kbId: string): Promise<KnowledgeBaseStats>
@@ -311,6 +312,12 @@ export function createKnowledgeStorageClient(opts?: { workerUrl?: URL }): Knowle
       sha256,
       wikiNotePath,
       ...(clearedTombstones === undefined ? {} : { clearedTombstones }),
+    })),
+    clearOrganizeTombstones: (kbId, docIds) => request(id => ({
+      id,
+      op: 'clearOrganizeTombstones',
+      kbId,
+      docIds,
     })),
     getPendingOrganizeBatch: (kbId, nowMs, batchOpts) => request(id => ({
       id,
