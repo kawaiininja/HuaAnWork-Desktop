@@ -13,7 +13,7 @@
 - **评审方式：** 按 `superpowers:requesting-code-review` 派发独立 `general-purpose` reviewer；对 HEAD 做只读源码审查、定向测试、typecheck 与完整门禁。本文档由主会话根据 reviewer 最终报告整理，关键问题定位在落档前再次读码复核。
 - **范围外：** 真机/GUI、维护页、composer、引用预览与打包应用整理槽观察按计划归 M1-3/发布验收；两个既存未跟踪文件 `2026-11-25-knowledge-base-m1-3-session-mount-ui-citations.md`、`2026-11-25-knowledge-base-m2-0-legacy-office-spike.md` 不属于本次评审。
 - **当前判定：** **With fixes / 修复后可合并（0 Critical / 1 Important / 5 Minor）。** 实现与计划及 owner 裁定高度一致，完整 `corepack yarn check` 实跑退出码为 0；合并前应修复 I-1，Minor 不阻塞。
-- **GLM 轨校准与修复确认（2026-11-27）：** §三 六项事实全部属实；I-1、M-2 已修复并补 3 条回归测试，完整 `corepack yarn check` 实跑 `GATE_EXIT=0`（落档时修复尚未提交）；M-1 已裁定为「停止并抑制自动重启」，须在 M1-3 接入取消路由之前落地，代码落地时点与是否现在写入计划 L525 两项待定（§6.6）；M-3/M-4/M-5 按原文留下一轮。逐条校准、验证记录与裁定全文见 §六。
+- **GLM 轨校准与修复确认（2026-11-27）：** §三 六项事实全部属实；I-1、M-2 已修复并补 3 条回归测试，修复已提交为 `728c7619e4`，完整 `corepack yarn check` 实跑 `GATE_EXIT=0`；M-1 已裁定为「停止并抑制自动重启」，须在 M1-3 接入取消路由之前落地，代码落地时点与是否现在写入计划 L525 两项待定（§6.6）；M-3/M-4/M-5 按原文留下一轮。逐条校准、验证记录与裁定全文见 §六。
 
 严重度口径：
 
@@ -154,7 +154,7 @@ reviewer 完整阅读实施计划、计划评审与规格相关 diff；逐行阅
 
 ## 六、GLM 轨校准与处置（2026-11-27）
 
-> 本节由 GLM 轨在 owner 授权下追加；§一～§五 保留 kimi 评审原文。校准对象是本文所评 HEAD（`84f622026f`）的六项发现；修复与新增测试落在同一分支的工作区，截至本节落档时尚未提交。除 §6.3 列出的实跑项外，本节结论来自读码。
+> 本节由 GLM 轨在 owner 授权下追加；§一～§五 保留 kimi 评审原文。校准对象是本文所评 HEAD（`84f622026f`）的六项发现；修复与新增测试已提交到同一分支（`728c7619e4`）。除 §6.3 列出的实跑项外，本节结论来自读码。
 
 ### 6.1 逐条校准
 
@@ -186,6 +186,7 @@ reviewer 完整阅读实施计划、计划评审与规格相关 diff；逐行阅
 
 - `corepack yarn workspace dsh-plugin-huaanwork typecheck`：退出码 0（5 个工程）。
 - 完整 `corepack yarn check`：输出重定向并显式记录 **`GATE_EXIT=0`**；Vitest 合计 5782 通过、15 skipped、0 失败（较 §四 的 5779 多出的 3 条即上表新增），15 个 node:test 套件 `# fail 0`。门禁期间未并发其它含 `verify:aa` 的命令。
+- 提交前复跑（修复提交为 `728c7619e4`）：`corepack yarn workspace dsh-plugin-huaanwork typecheck` 退出码 0；聚焦 Vitest 6 个文件 118 通过、0 失败（organizer 49、organizer-integration 23、organizer-phase 5、org-isolation 17、org-tools 10、tool-allow 14），退出码 0；提交后 `node scripts/check-whitespace.mjs` 覆盖已提交代码 diff，退出码 0。完整 `corepack yarn check` 未在提交后重跑，沿用上面那次实跑：提交内容与当时的工作区代码相同，期间只改了文档。
 - **未执行、不声称通过**：真机 / GUI / 打包应用整理槽观察仍按原计划归 M1-3 / 发布验收；M-1 的抑制逻辑尚无代码（见 §6.4）。
 
 ### 6.4 M-1 裁定（2026-11-27 owner 裁定，采纳 GLM 轨建议）
@@ -204,7 +205,7 @@ reviewer 完整阅读实施计划、计划评审与规格相关 diff；逐行阅
 
 ### 6.5 合并评估更新
 
-§五.1 的合并前事项（修复 I-1）与 §五.3 的可顺手项（M-2）已完成，本文唯一 Important 闭环；M-1 已裁定、尚未落代码（时点待定，见 §6.6）。剩余 M-3/M-4/M-5 按原文不阻塞合并。合并以把 §6.2 的修复提交到本分支为前提，真机验收边界不变。
+§五.1 的合并前事项（修复 I-1）与 §五.3 的可顺手项（M-2）已完成，本文唯一 Important 闭环；M-1 已裁定、尚未落代码（时点待定，见 §6.6）。剩余 M-3/M-4/M-5 按原文不阻塞合并。§6.2 的修复已提交到本分支（`728c7619e4`），合并前提已满足；真机验收边界不变。
 
 ### 6.6 待定项（2026-11-27 停放）
 
