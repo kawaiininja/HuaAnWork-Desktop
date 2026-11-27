@@ -145,6 +145,8 @@ export function apply(ctx: Context): void {
     if (sessionDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${sessionDenial}` };
     const rootDenial = organizerRootDenial(ctx, execution);
     if (rootDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${rootDenial}` };
+    const traversalDenial = organizerParentTraversalDenial(execution);
+    if (traversalDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${traversalDenial}` };
     const organizerDenial = organizerWriteDenial(ctx, execution);
     if (organizerDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${organizerDenial}` };
     const mode = readGuardMode(ctx.huaanworkProfileDir);
@@ -173,6 +175,8 @@ export function apply(ctx: Context): void {
     if (sessionDenial !== undefined) return `huaanwork-guard: ${sessionDenial}`;
     const rootDenial = organizerRootDenial(ctx, execution);
     if (rootDenial !== undefined) return `huaanwork-guard: ${rootDenial}`;
+    const traversalDenial = organizerParentTraversalDenial(execution);
+    if (traversalDenial !== undefined) return `huaanwork-guard: ${traversalDenial}`;
     const organizerDenial = organizerWriteDenial(ctx, execution);
     if (organizerDenial !== undefined) return `huaanwork-guard: ${organizerDenial}`;
     const mode = readGuardMode(ctx.huaanworkProfileDir);
@@ -211,6 +215,10 @@ export const REASON_ORGANIZER_TEMP =
 export const REASON_ORGANIZER_SYMLINK =
   "知识库整理会话只允许写入库内普通文件路径：符号链接（含指向库外的悬空链接）一律拒绝";
 
+/** 整理会话路径参数含 .. 段的拒绝原因(词法折叠会掩盖符号链接的物理穿越)。 */
+export const REASON_ORGANIZER_PARENT_TRAVERSAL =
+  "知识库整理会话只允许 wiki/ 根相对的下行路径：路径参数不得包含 .. 段，请改为库内下行路径";
+
 /** 整理会话缺少登记可写根时的拒绝原因(宿主侧不变量失败:只陈述事实,模型无从整改)。 */
 export const REASON_ORGANIZER_ROOT_MISSING =
   "knowledge-organize-root-missing：知识库整理会话缺少登记的可写根，无法判定路径边界，本次调用拒绝";
@@ -233,8 +241,28 @@ function organizerRootDenial(
   return root !== undefined && root.length > 0 ? undefined : REASON_ORGANIZER_ROOT_MISSING;
 }
 
-/** 写工具落盘前要核对的路径参数键(与 `@huaanwork/policy` 的 `pathsAreInside` 同集合)。 */
-const WRITE_PATH_KEYS = ["path", "file", "file_path", "root"] as const;
+/** 整理槽 fs 工具要核对的路径参数键(与 `@huaanwork/policy` 的 `pathsAreInside` 同集合)。 */
+const FS_PATH_KEYS = ["path", "file", "file_path", "root"] as const;
+
+/**
+ * 整理槽 fs 路径参数的 .. 段拒绝(规格 §5.3 第 2 条)。
+ *
+ * 原始拼写含 .. 时,本文件与 decide 的词法折叠会把 `sub/../evil.md` 折成库内路径,
+ * 逐段 lstat 看不到中间符号链接;上游 fs-local 保留 .. 物理拼写并经 native realpath
+ * 物理穿越,可真实写/读库外(沙箱 workspace-write 的可写根含平台临时区)。整理提示词
+ * 只要求 wiki 根相对的下行路径,.. 段无合法用途,按原始拼写直接拒绝,两种分隔符都拦。
+ */
+function organizerParentTraversalDenial(execution: ToolExecution): string | undefined {
+  if (!isKbOrganizeSessionId(sessionIdOfAgentRef(execution.agent))) return undefined;
+  const args = objectArgs(execution.arguments);
+  for (const key of FS_PATH_KEYS) {
+    const candidate = args[key];
+    if (typeof candidate === "string" && candidate.split(/[\\/]/).includes("..")) {
+      return REASON_ORGANIZER_PARENT_TRAVERSAL;
+    }
+  }
+  return undefined;
+}
 
 /**
  * 知识库整理槽的写目标附加检查(规格 §5.3 第 2 条):OS 临时目录与符号链接。
@@ -262,7 +290,7 @@ export function organizerWriteDenial(
   const realTmp = safeRealpath(rawTmp);
   const normalizedRoot = safeRealpath(root) ?? normalizeTempAlias(resolve(root), rawTmp, realTmp);
   const args = objectArgs(execution.arguments);
-  for (const key of WRITE_PATH_KEYS) {
+  for (const key of FS_PATH_KEYS) {
     const candidate = args[key];
     if (typeof candidate !== "string" || candidate.length === 0) continue;
     const target = resolve(root, candidate);

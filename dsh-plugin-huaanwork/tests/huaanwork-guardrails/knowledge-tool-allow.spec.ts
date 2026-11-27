@@ -497,6 +497,57 @@ test("organizer sessions cannot write through a dangling directory symlink insid
   }
 });
 
+test("organizer sessions cannot traverse a live directory symlink with .. segments to write outside the knowledge root", async () => {
+  const { wiki } = createKnowledgeRoot();
+  const outside = makeTemp("huaanwork-kb-outside-live-");
+  // 已存在的目录符号链接指向库外已存在目录:词法折叠把 sub/../evil.md 折成库内路径,
+  // 逐段 lstat 看不到 sub;上游 fs-local 保留 .. 物理拼写并经 native realpath 物理穿越,
+  // 真实落盘到沙箱可写的临时区。必须在原始拼写上拒绝 .. 段(两种分隔符都拦)。
+  symlinkSync(outside, join(wiki, "sub"), "dir");
+
+  const harness = createPolicyHarness({ sessionId: SESSION_ID, workspaceRoot: wiki });
+  for (const mode of MODES) {
+    harness.setMode(mode);
+    for (const name of ["write", "edit"]) {
+      for (const spelling of ["sub/../evil.md", "sub\\..\\evil.md"]) {
+        const result = await harness.preExecute(name, { path: spelling, content: "escape" });
+        assert.equal(result.kind, "deny", `${name} ${mode} ${spelling} pre-execute`);
+        assert.match(String(result.reason ?? ""), /下行路径/, `${name} ${mode} pre-execute reason`);
+        assert.match(String(harness.guard(name, { path: spelling }) ?? ""), /下行路径/, `${name} ${mode} guard reason`);
+      }
+    }
+  }
+  // 正对照:无 .. 段的库内合法写入不受影响。
+  const ok = await harness.preExecute("write", { path: "docs/ok.md", content: "ok" });
+  assert.equal(ok.kind, "allow", "a downward inside-wiki write must stay allowed");
+});
+
+test("organizer sessions cannot use .. segments in read/glob/grep path arguments", async () => {
+  const { wiki } = createKnowledgeRoot();
+  const outside = makeTemp("huaanwork-kb-outside-read-");
+  symlinkSync(outside, join(wiki, "sub"), "dir");
+  // 折叠后的库内路径真实存在:read/glob/grep 的 pathsAreInside 现状会放行,
+  // 而上游按物理拼写实际读/列的是库外目录。原始拼写含 .. 段必须一律拒绝。
+  writeFileSync(join(wiki, "evil.md"), "inside");
+
+  const harness = createPolicyHarness({ sessionId: SESSION_ID, workspaceRoot: wiki });
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [
+    { name: "read", args: { file_path: "sub/../evil.md" } },
+    { name: "read_file", args: { path: "sub/../evil.md" } },
+    { name: "glob", args: { pattern: "*", path: "sub/.." } },
+    { name: "grep", args: { pattern: "x", path: "sub/.." } },
+  ];
+  for (const mode of MODES) {
+    harness.setMode(mode);
+    for (const call of calls) {
+      const result = await harness.preExecute(call.name, call.args);
+      assert.equal(result.kind, "deny", `${call.name} ${mode} pre-execute`);
+      assert.match(String(result.reason ?? ""), /下行路径/, `${call.name} ${mode} pre-execute reason`);
+      assert.match(String(harness.guard(call.name, call.args) ?? ""), /下行路径/, `${call.name} ${mode} guard reason`);
+    }
+  }
+});
+
 test("organizer temp directory check aligns canonical tmpdir aliases without false-denying inside-wiki writes", async () => {
   const { wiki } = createKnowledgeRoot();
   const realTmp = realpathSync(tmpdir());
