@@ -213,3 +213,90 @@ reviewer 完整阅读实施计划、计划评审与规格相关 diff；逐行阅
 
 1. **M-1 抑制逻辑的代码落地时点。** 现在在本分支实现（按 §6.4 的验收补 release 重入测试），还是留到 M1-3。不变约束：落地之前 M1-3 不得接入 `knowledge.organizeCancel` 路由。
 2. **M-1 裁定是否现在写入实施计划 Task 5 的取消规则（L525）。** 现在补入，还是随 M1-3 修订计划时一并补入。在此之前 L525 只描述四类取消的现有映射，不含 `user-stop` 的重入抑制。
+
+---
+
+## 七、修复复核（2026-11-27，Kimi 轨）
+
+> 本节由 Kimi 主会话按 `superpowers:requesting-code-review` 流程，继续委派首轮独立 `general-purpose` reviewer 复用既有上下文完成。复核过程只读，不修改实现、测试、HEAD、index 或已有评审文本；本节为复核结论的追加落档。
+
+### 7.1 范围与判定
+
+- **原评审 HEAD / 复核基线：** `84f622026f846242a66585c11566c4b11002fe49`
+- **代码修复：** `728c7619e4`（`fix(knowledge): snapshot idle timeout and name the missing-root denial`）
+- **复核 HEAD：** `8018fa417197e9a98447761bb6665a94a7b3adf4`（修复后仅有一个 docs 提交）
+- **范围：** `84f622026f..8018fa4171`，聚焦 I-1、M-2、新增测试及其直接回归面，不重开已闭环的全量架构评审。
+- **判定：** **修复符合预期；Ready to merge / Yes。** I-1 与 M-2 均闭环，未发现本修复引入新的 Critical、Important 或代码级 Minor。新增记录只有一条文档措辞 Nit（N-1）与一条既存边界观察（N-2），均不阻塞。
+
+### 7.2 I-1 复核：快照、钳制与异常回落均符合首选方案
+
+1. **读取次数已收敛。** `organizer.ts:154-170` 的 `readIdleTimeoutMs` 以 try/catch 包裹 `deps.timeoutMs()`，读取异常回落 `DEFAULT_AUTOMATION_TIMEOUT_MS` 并只告警一次；`Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 默认值` 正确处理 0、负数、NaN、Infinity 与浮点。全文件只剩创建看门狗时的一处 `deps.timeoutMs()` 调用（`organizer.ts:289`），首次 arm、touch、wake 比较及重新武装均复用同一快照。
+2. **异常出口已封闭。** deadline promise 仍预挂 catch；timer 的 `wake()` 只使用快照数字与 `deps.now()`；bridge 心跳的 `touch()` 不再执行 I/O。原评审指出的 promise、timer、bridge 三条异常路径均不再暴露 `timeoutMs()` 读取异常。
+3. **原看门狗语义不变。** `deps.now() - baseline >= 快照`、`noteSystemResume() = touch()` 与 `recordTerminal` 首因获胜均未改。每批在 `organizer.ts:619` 新建 deadline，因此运行中修改 `automation_timeout_ms` 从下一批生效，与自动化 `activityDeadline` 先例及更新后的实施计划一致。
+4. **GLM 的严重度校准经源码核实。** Host 的未捕获异常会经 `host-process-entry.ts:49` 的 `installFailLoud` 进入 fail-loud `exit(1)`；上游 `prepareExecution` 同时会把工具监听器异常转成错误结果。该校准不改变原 Important 分级，也没有把修复前的 fail-closed 方向误写成安全绕过。
+
+### 7.3 M-2 复核：两层缝统一处理，覆盖 read 与 `kb_org_*`
+
+1. `policy.ts:214-232` 新增 `organizerRootDenial`，在 `tools/pre-execute`（`:146-147`）与 `tools.guard`（`:174-175`）两层入口、先于 `organizerWriteDenial` 和 `toToolCall` 执行，因此先于所有 `sessionWorkspaceRoot` 根推导。
+2. 根缺失判据与 `sandbox-cwd.ts` 的 `rootOf` 一致；白名单内工具的拒绝原因包含稳定代码 `knowledge-organize-root-missing`。非整理会话经前缀判断短路，有根整理会话经根非空短路，其它意外异常仍按原路径传播。
+3. 三条新增测试均具备行为判别力，而非源码文本钉：
+   - 「once per watchdog」经生产 activity 注册器驱动真实 deadline，5 次心跳 + resume + 一次唤醒后只读 1 次；旧路径推算为 9 次，与 §6.3 的红测记录一致。
+   - 「falls back to default」注入 EACCES，验证仍能到 followup、心跳/resume 不抛、默认 10 分钟边界超时计次且只告警一次；旧实现会在首次 arm 抛错并停在 createAgent 前。
+   - 「named denial in both policy seams」使用真实 `applyPolicy` 监听器，对 write/edit/read + 三个 `kb_org_*` 共 6 个工具、3 个策略档验证结构化拒绝，覆盖原建议容易遗漏的 read 与宿主工具。
+
+### 7.4 新增不阻塞观察
+
+#### N-1【文档措辞 Nit】§6.2 的「所有工具」与缺根原因绑定得过宽
+
+当整理会话仍持有 `huaanworkSessionToolAllow` 时，非白名单工具（如 `bash`）会先命中 `sessionToolAllowDenial`，得到白名单拒绝，而不是包含 `knowledge-organize-root-missing` 的缺根拒绝。代码实际保证的是**任何工具都不再因缺根抛异常，均得到结构化拒绝**；白名单内工具才保证具名缺根原因。建议把 §6.2 对应句改为「所有工具均为结构化拒绝；白名单内工具的原因含稳定代码 `knowledge-organize-root-missing`」。这是文档精度问题，不是代码缺陷。
+
+#### N-2【既存边界观察】超大 `automation_timeout_ms` 可造成 setTimeout 截断空转
+
+`settings.ts` 的 `parsePositiveMs` 只要求正有限数，没有上限；Node 对大于 `2^31−1` ms（约 24.8 天）的延迟会截断为约 1 ms，随后 `wake → 未超时 → 按剩余重武装` 可能形成高频空转。旧看门狗与自动化 `activityDeadline` 对同一设置已有该暴露，**不是 `728c7619e4` 引入的回归**，且需要手工设置极端值才能触发。下一轮可在 `readIdleTimeoutMs` 增加合理上限；自动化侧是否同步收口另行评估。
+
+### 7.5 独立验证记录
+
+以下为本轮 reviewer 实际执行，不是转述 GLM 自述：
+
+| 验证项 | 结果 |
+| --- | --- |
+| `corepack yarn workspace dsh-plugin-huaanwork typecheck` | **退出码 0**，5 个工程 |
+| 六个聚焦 spec：organizer / organizer-integration / organizer-phase / org-isolation / org-tools / tool-allow | **6 files passed；118 passed / 0 failed** |
+| 逐文件计数 | organizer 49、integration 23、phase 5、isolation 17、org-tools 10、tool-allow 14，与 §6.3 一致 |
+
+本轮未重跑完整 `corepack yarn check`：原评审在 `84f622026f` 已实跑通过；此后唯一代码增量是 `728c7619e4`，已由上述 118 条聚焦测试和 typecheck 直接覆盖；其后 `8018fa4171` 为 docs-only。§6.3 所记同代码完整门禁 `GATE_EXIT=0` 与本轮证据无矛盾，但应仍归为 GLM 轨的实跑记录，不冒充本轮独立完整门禁证据。
+
+§6.3 的三条修复前失败模式未在旧 revision 重新执行；reviewer 按旧代码路径逐条推算，确认机制与新增测试断言互洽。真机/GUI/打包应用观察仍未执行，边界不变。
+
+### 7.6 最终评估
+
+**是否符合预期：是。Ready to merge：Yes。**
+
+I-1 按原评审首选的快照方案落地并封住异常路径，M-2 在两层政策缝入口统一收口且覆盖 read/`kb_org_*`，三条新增回归测试具有真实判别力。M-1 仍按 §6.4/§6.6 保持「已裁定、未实现」，必须在 M1-3 接入 `knowledge.organizeCancel` 前完成；M-3/M-4/M-5 继续留下一轮。以上事项均不构成当前 M1-2 合并阻塞。
+
+---
+
+## 八、实施期裁定评估与延后债务补记（2026-11-27）
+
+> 本节经 owner 确认后补记实施期（`2da440fbf1`～`84f622026f`）的三项裁定评估结论，将此前仅停留在会话记录中的三条延后债务正式落盘，防止跨里程碑丢失。§一～§七 原文保持不动。
+
+### 8.1 裁定 1 与裁定 2 确认
+
+1. **裁定 1（GLM §15 的 R-1～R-3 落文后开工，`2da440fbf1`）：确认认可。**
+   - R-1（fake 不创建 `wiki/` 根、按上游 `write` 行为补建 `docs/`）与 R-3（测试 5 先拨 `deps.now` 再 `noteSystemResume()`、最后推 fake timer）消除了计划正文里的字面不可实现与自相矛盾，避免 Task 5/6 返工。
+   - **R-2 规格口径补认**：owner 确认接受将 `knowledge-organize-wiki-root-unwritable`（`mkdir(wikiRoot)` 失败）计入 `organize_attempts`（与未 mark 同口径，已同步至规格 L79、L418），有界且零模型成本，权限恢复后可由 `triggerManual` 清零。
+2. **裁定 2（追加 `84f622026f` 闭环 failure-write 跨 `releaseAndDrain` 重入）：确认认可。**
+   - 首轮修复 `bf6a6b6fb2` 仅置 `scheduleNext = false`，在生产接线 `releaseAndDrain → drainUserQueue → reevaluateKbOrganize → scheduleEvaluate` 下仍会因 `retry_after` 未落盘而无延迟连续重入、每轮消耗完整模型回合；`84f622026f` 将其落到 `zeroProgressByKb` 的进程内 1/5/3 退避（在 `startClaim` 的 `finally` 内先于 `claim.resolveLifecycle()` 武装计时器）并将单测 `releaseSlot` 夹具对齐生产同形，修复必要且闭环。
+   - **微残余观察（有界、不阻塞）**：同一批内若部分文档推进或成功落盘 `retry_after`、仅剩余文档写失败，下一次重评估 `peek` 命中签名变化（`organizer.ts:578` `observePendingSignature` 先于 `isBackoffBlocked`），会清空退避并至多多跑 1 轮直到剩余文档签名稳定；不构成无限循环。
+
+### 8.2 裁定 3 延后债务落盘（不阻塞 M1-2 合并，M1-3 接入路由前关闭）
+
+以下三条在 M1-2 均无产品 HTTP 路由入口（`ROUTE_TABLE` 保持 92），不阻塞 M1-2 合并，统一纳入 M1-3 清债清单（与 §6.4 已裁定的 M-1 一并推进）：
+
+| 编号 | 事项 | 位置 | 校准后的真实边界与 M1-3 处置要求 |
+| :--- | :--- | :--- | :--- |
+| **D-1** | `triggerManual` 在途批次的退避与状态边界 | `organizer.ts:796-806, 846-862` | `bf6a6b6fb2` 将 `waitForKbSlotIdle` 提前到 `reset` 之前，但仍留两处边界：① 在途批次以 `scheduleNext=true` 在 `resolveLifecycle()` 前同步拉起下一批，或 `releaseSlot` 触发的 `scheduleEvaluate` 先醒来占槽时，`triggerManual` 醒来仍与新批次并发 `reset`/`clearZeroProgress`；② `assertOrganizeAllowed` 仅在 `waitForKbSlotIdle` 前执行，等待期间若库进入维护/删除/recovery，醒来后无参 `triggerManual` 会清退避并静默跳过而非抛 `knowledge-base-busy`。**处置**：M1-3 接入 `knowledge.organize` / `knowledge.organizeCancel` 时，与 M-1（`user-stop` 抑制自动重启）一并收口（等待后复检 + 防止在途结束续跑插队）。 |
+| **D-2** | 50 MiB 总量上限会拦截纯墓碑收缩（**待规格侧裁定**） | `org-tools.ts:267-283` | `executeMarkOrganized` 在删墓碑前即按当前磁盘总量判断 `wikiTotalBytes > totalLimit`。整理 Agent 无删文件工具，删旧卡片只能走宿主 `clearedTombstones`；一旦 `wiki/` 越过 50 MiB，连纯墓碑收缩也会被拒、形成逻辑自锁。**处置**：需规格侧拍板——建议按**扣除本次 `deletePlans` 待删卡片字节数后的预期净体积**判定（允许净收缩脱困，同时防止模型借纯墓碑批往 `topics/` 灌水绕过 50 MiB 上限），不宜简单对纯墓碑跳过上限校验。 |
+| **D-3** | `autoOrganize` 从 `false → true` 未主动触发整理排期 | `host.ts:547, 640-644`；`sync-engine.ts:408-413, 1833-1852` | `host.update` 的 `finally` 仅在 `rebindSucceeded && updateSucceeded` 时调 `notifyOrganizerPending(kbId)`。**重要纠偏**：`sync-engine.ts` 的周期对账经 `canRunBackgroundSync` 跳过 `watchPaused=true` 的库，而 `watchPaused=true` 不阻断阶段 2 整理（`host.ts:766-779`），因此「靠 ≤300s 周期对账兜底」**仅在 `!watchPaused` 时成立**；暂停监听下打开自动整理无周期兜底，且未暂停监听时用户打开开关干等最多 5 分钟也反直觉。**处置**：M1-3 接入 `knowledge.update` 路由与前端开关时**必须**补齐 `autoOrganize: false → true` 后的 `notifyOrganizerPending(kbId)` 及回归测试。 |
+
+其余代码评审残余沿用 §三、§六、§七 记录：M-1（已裁定，M1-3 接 `knowledge.organizeCancel` 前必落）、M-3/M-4/M-5、N-2（超大 `automation_timeout_ms` 截断上限）及计划评审 R-4（真机休眠唤醒先后时序）。
