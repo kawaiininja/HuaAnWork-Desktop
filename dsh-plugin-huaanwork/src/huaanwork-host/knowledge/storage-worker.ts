@@ -22,6 +22,7 @@ import {
   abortRebuildStaging,
   beginRebuildStaging,
   checkpoint,
+  clearOrganizeTombstones,
   commitRebuildStaging,
   countEmbeddings,
   dbPath,
@@ -285,6 +286,8 @@ async function dispatch(message: StorageWorkerRequest): Promise<StorageResultMap
         wikiNotePath: message.wikiNotePath,
         ...(message.clearedTombstones === undefined ? {} : { clearedTombstones: message.clearedTombstones }),
       })
+    case 'clearOrganizeTombstones':
+      return clearOrganizeTombstones(requireEntry(message.kbId).db, message.docIds)
     case 'getPendingOrganizeBatch':
       return getPendingOrganizeBatch(requireEntry(message.kbId).db, {
         nowMs: message.nowMs,

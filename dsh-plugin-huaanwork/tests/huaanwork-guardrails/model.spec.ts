@@ -1002,6 +1002,51 @@ test("expert_team_dispatch survives the XML text protocol", async () => {
   }
 });
 
+test("kb_org_* organizer tools survive the static tool filter and stream as tool-calls", async () => {
+  // 整理工具是三个宿主工具:漏注册会把模型的调用静默丢掉,回合「正常结束但任务没做」。
+  for (const name of ["kb_org_get_delta", "kb_org_read_doc", "kb_org_mark_organized"]) {
+    assert.equal(isRegisteredToolName(name), true, name);
+    const argsJson = JSON.stringify({ kbId: "kb-1" });
+    const payloads = [
+      JSON.stringify({
+        choices: [{ delta: { tool_calls: [{ index: 0, id: `k-${name}`, function: { name, arguments: argsJson } }] } }],
+      }),
+    ];
+    const parsed = parseSseToolCalls(payloads, isRegisteredToolName);
+    assert.equal(parsed.length, 1, name);
+    assert.equal(parsed[0]?.name, name);
+  }
+
+  const original = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return sseResponse([
+      { choices: [{ delta: { reasoning_content: "先读批次增量。" } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "k1", function: { name: "kb_org_get_delta", arguments: "{\"kbId\":\"kb-1\"}" } }] }, finish_reason: "tool_calls" }] },
+      "[DONE]",
+    ]);
+  };
+  try {
+    const profileDir = mkdtempSync(join(tmpdir(), "huaanwork-kb-org-model-"));
+    writeFileSync(
+      join(profileDir, "huaanwork-settings.json"),
+      JSON.stringify({ base_url: "http://127.0.0.1:11434/v1", model: "local", api_key: "" }),
+      "utf8",
+    );
+    const chunks = await collect(new HuaAnWorkAdapter(profileDir).stream(userOptions()));
+    assert.equal(fetchCount, 1);
+    const toolEnd = chunks.find(
+      (chunk) => chunk.type === "block-end" && chunk.block.type === "tool-call",
+    );
+    assert.ok(toolEnd && toolEnd.type === "block-end" && toolEnd.block.type === "tool-call");
+    assert.equal(toolEnd.block.name, "kb_org_get_delta");
+    assert.deepEqual(chunks.at(-1), { type: "finish", reason: { kind: "tool-calls" } });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 describe("session-bound model selection", () => {
   function profileWithSettings(settings: Record<string, unknown>): string {
     const root = mkdtempSync(join(tmpdir(), "huaanwork-session-model-"));

@@ -1,14 +1,48 @@
 import { existsSync, statSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 
+import { isKbOrganizeSessionId, kbIdFromOrganizeSessionId } from './knowledge/session-ids.ts'
 import { sessionIdFor } from './session-id.ts'
 import {
   neutralAutomationRootPath,
   neutralAutomationsBaseDir,
+  neutralKnowledgeWikiRootPath,
   neutralSessionRootPath,
   neutralWorkspaceRoot,
   neutralWorkspaceRootPath,
 } from './workspace-state.ts'
+
+/**
+ * 已登记知识库 id 的同步 provider(规格 §8.1 / §5.3,M1-2 Task 6 由 KnowledgeHost 注入)。
+ *
+ * 保存的是**实时 getter** 而不是启动时快照:注册 / 删库后下一次可写根推导立即反映。
+ * 未注入时返回空集合,整理前缀因此 fail closed;`writableRootForSession` 不读磁盘
+ * (`existsSync(wiki)`)代替登记判据。
+ */
+let registeredKnowledgeBaseIdsProvider: (() => ReadonlySet<string>) | undefined
+const EMPTY_KNOWLEDGE_BASE_IDS: ReadonlySet<string> = new Set()
+
+/**
+ * 注入登记 id provider;返回所有权校验的 disposer。
+ * 只有当前 provider 仍是本次注册的那一个时才清回空实现——旧 Host 的晚到退场
+ * 不得把新 Host 注入的 provider 清掉。
+ */
+export function setRegisteredKnowledgeBaseIdsProvider(
+  provider: (() => ReadonlySet<string>) | undefined,
+): () => void {
+  registeredKnowledgeBaseIdsProvider = provider
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    if (registeredKnowledgeBaseIdsProvider === provider) registeredKnowledgeBaseIdsProvider = undefined
+  }
+}
+
+/** 当前已登记知识库 id 集合;provider 缺席时为空集合。 */
+export function registeredKnowledgeBaseIds(): ReadonlySet<string> {
+  return registeredKnowledgeBaseIdsProvider?.() ?? EMPTY_KNOWLEDGE_BASE_IDS
+}
 
 /**
  * 会话可写根推导(规格 §3.2.3)。projects / tasks / headerCwd 由调用方先载入再传入。
@@ -17,6 +51,8 @@ import {
  * 删掉这次读取后，刚铸造、尚未写 header 的会话会掉回共享 workspace。
  *
  * 推导顺序(前一级命中即返回):
+ * 0. 知识库整理槽(`huaanwork-kb-org-<kbId>`):只认 `registeredKbIds` 中的登记,
+ *    返回 `<profile>/workspace-knowledge/<kbId>/wiki`;未登记直接抛错,不进入后续回落。
  * 1. 任务绑定。
  * 2. 项目稳定 id。例外:项目根解析后等于中立 workspace，且会话 id 以中立稳定 id 加 `-`
  *    开头，并且 workspace-sessions/<sessionId> 已存在或 headerCwd 在该目录内时，
@@ -33,8 +69,20 @@ export function writableRootForSession(input: {
   projects: readonly { id: string; root: string }[]
   tasks: readonly { sessionId?: string; projectId: string }[]
   headerCwd?: string | undefined
+  /** 已登记知识库 id(整理前缀唯一合法根来源);缺省 = 空集合,整理前缀 fail closed。 */
+  registeredKbIds?: ReadonlySet<string>
 }): string {
-  const { profileDir, sessionId, projects, tasks, headerCwd } = input
+  const { profileDir, sessionId, projects, tasks, headerCwd, registeredKbIds } = input
+
+  // 整理槽先于任务绑定 / 项目根 / 中立工作区分支:它的写边界只由已登记库 id 决定,
+  // 任务绑定或 headerCwd 都不得改写;未登记一律抛错,绝不回落到前台或中立根。
+  if (isKbOrganizeSessionId(sessionId)) {
+    const kbId = kbIdFromOrganizeSessionId(sessionId)
+    if (kbId === undefined || registeredKbIds?.has(kbId) !== true) {
+      throw new Error(`knowledge-organize-root-unregistered: ${sessionId}`)
+    }
+    return resolve(neutralKnowledgeWikiRootPath(profileDir, kbId))
+  }
 
   const boundTask = tasks.find((task) => task.sessionId === sessionId)
   if (boundTask) {

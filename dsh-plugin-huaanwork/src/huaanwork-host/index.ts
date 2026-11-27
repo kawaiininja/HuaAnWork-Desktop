@@ -26,6 +26,9 @@ import {
   setAgentPackageHost,
   setAgentsDirectory,
   setReevaluateDueAutomations,
+  setReevaluateKbOrganize,
+  releaseAndDrain,
+  type SessionRuntimeContext,
 } from './sessions.ts'
 import { createAgentCatalogSecurity } from './agent-package/catalog-security.ts'
 import { recoverCatalogPackageInstalls } from './agent-package/catalog-install.ts'
@@ -48,6 +51,10 @@ import { configureSkillCatalog } from './skill-catalog-client.ts'
 import { listProjects, listTasks, runsDir } from './stores.ts'
 import { clearPendingWorkspaceRoot, neutralAutomationsBaseDir, neutralKnowledgeBaseDir, neutralSessionsBaseDir, neutralWorkspaceRoot } from './workspace-state.ts'
 import { createKnowledgeHost } from './knowledge/host.ts'
+import { setKnowledgeHost } from './knowledge/host-ref.ts'
+import { createKnowledgeOrganizer } from './knowledge/organizer.ts'
+import { registerKnowledgeOrgTools } from './knowledge/org-tools.ts'
+import { setRegisteredKnowledgeBaseIdsProvider } from './writable-root.ts'
 import { registerCallHostTool } from '../huaanwork-guardrails/agent-tool.ts'
 import {
   registerAgentPackageCreationTools,
@@ -290,11 +297,51 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
       disabled: config.automationScheduler?.disabled === true,
     })
   }, 'huaanwork: automation scheduler')
-  // M1-1 知识库宿主：顶层独立 effect（绝不放进 tools effect）。0 库启动只读注册表；
-  // 系统休眠恢复经窄接口可选订阅，退场 disposer 先取消订阅、再 ≤1s 并行退场。
-  // 生产接线必须自己 start（不依赖任何测试调用）。
+  // M1-1 知识库宿主 + M1-2 单槽整理执行器：顶层独立 effect（绝不放进 tools effect）。
+  // 0 库启动只读注册表；系统休眠恢复经窄接口可选订阅，退场 disposer 先取消订阅、
+  // 再注销 host/ref 与登记 id provider，最后 ≤1s 并行退场；tools effect 仍在其后
+  // 注册，执行工具时经 getKnowledgeHost() 取本实例。生产接线必须自己 start。
   ctx.effect(() => {
     const knowledgeHost = createKnowledgeHost({ profileDir: config.profileDir })
+    const organizer = createKnowledgeOrganizer({
+      profileDir: config.profileDir,
+      dshHome: config.dshHome,
+      host: knowledgeHost,
+      scheduler: ctx.huaanworkTurnScheduler,
+      sessionRoots: ctx.huaanworkSessionRoots,
+      sessionToolAllow: ctx.huaanworkSessionToolAllow,
+      sessionModels: ctx.huaanworkSessionModels,
+      attachments: ctx.huaanworkAttachments,
+      createAgent: options => ctx.agents.create(options),
+      // 整理名额唯一释放器：释放槽位后让用户队列与其它评估接着排空。
+      releaseSlot: sessionId =>
+        releaseAndDrain(routeCtx.runtimeCtx ?? (ctx as unknown as SessionRuntimeContext), routeCtx, sessionId),
+      now: () => Date.now(),
+      timeoutMs: () => readHuaanworkSettingsSync(config.profileDir).automation_timeout_ms,
+    })
+    // provider 保存实时 getter：注册/删库后下一次可写根推导立即反映。
+    const unregisterKnowledgeHost = setKnowledgeHost(knowledgeHost)
+    const unregisterKnowledgeIds = setRegisteredKnowledgeBaseIdsProvider(
+      () => knowledgeHost.getRegisteredKnowledgeBaseIds(),
+    )
+    // 休眠恢复同时刷新整理看门狗基准；退场时先退订再 dispose host。
+    const unsubscribeOrganizerResume = knowledgeHost.onSystemResume(organizer.noteSystemResume)
+    // 维护/删库/退场取消与阶段 1 提交后的全局排期（notifyPending 忽略 kbId 扫描整个注册表）。
+    knowledgeHost.setOrganizerHooks({
+      cancelForKb: kbId => organizer.cancelForKb(kbId, 'maintenance'),
+      cancelAll: () => organizer.cancelAll(),
+      notifyPending: () => {
+        void organizer.scheduleEvaluate().catch(error =>
+          routeCtx.logger(`[knowledge] organize evaluation failed: ${String(error)}`),
+        )
+      },
+    })
+    // 用户队列排空后的整理槽重评估（sessions.ts 在到期自动化评估之后调用）。
+    setReevaluateKbOrganize(() => {
+      void organizer.scheduleEvaluate().catch(error =>
+        routeCtx.logger(`[knowledge] organize evaluation failed: ${String(error)}`),
+      )
+    })
     void knowledgeHost.start().catch((cause: unknown) => {
       routeCtx.logger(
         `[knowledge] host start failed: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -319,10 +366,18 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
       }
     }
     return async () => {
+      unsubscribeOrganizerResume()
       try {
         unsubscribeSystemResume?.()
-      } finally {
+      } catch {
+        // 宿主侧退订失败不阻断随后的 host 退场。
+      }
+      try {
+        unregisterKnowledgeIds()
+        unregisterKnowledgeHost()
         await knowledgeHost.dispose()
+      } finally {
+        setReevaluateKbOrganize(undefined)
       }
     }
   }, 'huaanwork: knowledge host')
@@ -521,12 +576,17 @@ export async function apply(ctx: Context, config: HuaanworkHostConfig): Promise<
         const unregisterResultArtifactTools = registerResultArtifactTools(toolCtx, config.profileDir)
         // 团长派工工具全局注册;只有团队回合经 claimed 附件与租约获得模型面。
         const unregisterExpertTeamDispatch = registerExpertTeamDispatchTool(toolCtx)
+        // 知识库整理工具全局注册;作用域由整理槽会话前缀与 policy 白名单锁定,
+        // 执行时经 getKnowledgeHost() 取同一知识库宿主(Task 6 完成接线)。
+        const unregisterKnowledgeOrgTools = registerKnowledgeOrgTools(toolCtx)
         syncHostToolDescription = () => {
           unregister?.()
           unregister = registerCallHostTool(toolCtx, agentsHost.snapshotForRuntime())
         }
         return () => {
-          // 先注销团长派工工具:随后的团队取消期间不得再有新的工具调用进入。
+          // 先注销知识库整理工具:knowledge effect 随后才 dispose host,工具不得晚于宿主退出。
+          unregisterKnowledgeOrgTools()
+          // 再注销团长派工工具:随后的团队取消期间不得再有新的工具调用进入。
           unregisterExpertTeamDispatch()
           syncHostToolDescription = undefined
           // 先注销创建工具再清空门面:卸载后不能再有持有门面的工具在途。

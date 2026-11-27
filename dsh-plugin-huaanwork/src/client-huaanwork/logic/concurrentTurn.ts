@@ -14,7 +14,7 @@ export function sendOpensTurn(result: { waiting: boolean; started: boolean }): b
  * 未开始（`started: false`）时原样返回。开启回合不清除已有的等待项。
  *
  * @param state 该标签当前的回合状态
- * @param result 宿主应答；`queueItemId` 只在 `waiting` 时存在
+ * @param result 宿主应答；`queueItemId` 覆盖 waiting 与已出队待 queue-start 的应答
  * @returns 更新后的状态；无需变化时返回入参本身
  */
 export function noteSendResult(

@@ -1,5 +1,7 @@
 import { sessionIdOfAgentRef } from '@huaanwork/policy/channels'
 
+import { isKbOrganizeSessionId } from './knowledge/session-ids.ts'
+
 /**
  * 共享回合锚点(设计 §「回合归属」)。
  *
@@ -13,7 +15,7 @@ import { sessionIdOfAgentRef } from '@huaanwork/policy/channels'
  */
 
 /** 一个会话当前回合的持久锚点。`clientMessageId` 只来自 Host 生成的 UUID / 自动化 runId。 */
-export type TurnAnchor = { clientMessageId: string; startedAt: string; origin: 'advanced' | 'automation' | 'unknown' }
+export type TurnAnchor = { clientMessageId: string; startedAt: string; origin: 'advanced' | 'automation' | 'knowledge' | 'unknown' }
 
 export type TurnAnchorStore = {
   /**
@@ -176,6 +178,9 @@ export function isTurnBoundaryMessage(raw: unknown): boolean {
  * pre-step 是 waterfall:监听器必须显式 `return next()`,否则其余 pre-step 监听器
  * (工具可见性、拒发校验)不会执行。两个监听器都按各自载荷幂等调用 `notePreStep`,
  * 调用顺序不影响最终锚点与 `startedAt`。
+ *
+ * 知识库整理槽直接早退:它没有用户回合锚点,也不得挤占 256 条 LRU
+ * (规格 §8.1「不注册回合锚点,因此不会因被当成 advanced 而挂上 result_present」)。
  */
 export function installTurnAnchorHooks(ctx: {
   huaanworkTurnAnchors?: TurnAnchorStore
@@ -185,7 +190,7 @@ export function installTurnAnchorHooks(ctx: {
     'agent/pre-step',
     ((payload: { agent?: unknown; messages?: unknown }, next: () => unknown) => {
       const sessionId = sessionIdOfAgentRef(payload?.agent as { id?: string; session?: { id?: string } } | undefined)
-      if (sessionId !== undefined) {
+      if (sessionId !== undefined && !isKbOrganizeSessionId(sessionId)) {
         const messages = Array.isArray(payload?.messages) ? (payload.messages as readonly unknown[]) : []
         ctx.huaanworkTurnAnchors?.notePreStep(sessionId, messages, new Date().toISOString())
       }
@@ -197,7 +202,7 @@ export function installTurnAnchorHooks(ctx: {
     'session/disposed',
     ((session: { id?: string }) => {
       const sessionId = session?.id
-      if (typeof sessionId === 'string' && sessionId.length > 0) {
+      if (typeof sessionId === 'string' && sessionId.length > 0 && !isKbOrganizeSessionId(sessionId)) {
         ctx.huaanworkTurnAnchors?.clearSession(sessionId)
       }
     }) as never,

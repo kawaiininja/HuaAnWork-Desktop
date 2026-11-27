@@ -3,6 +3,7 @@ import { readdir, rm } from 'node:fs/promises'
 import { basename, join, resolve, sep } from 'node:path'
 
 import { AUTO_SESSION_PREFIX, LEGACY_CHAT_AUTO_SESSION_PREFIX } from './automation-session-ids.ts'
+import { KB_ORG_SESSION_PREFIX } from './knowledge/session-ids.ts'
 import { readSessionHeader } from './session-view.ts'
 
 /**
@@ -45,13 +46,15 @@ function cwdWithinAnyRoot(cwd: string | undefined, roots: readonly string[]): bo
  * - 自动化运行会话(huaanwork-auto- 前缀;旧 huaanwork-chat-auto- 前缀兜底——正常已被
  *   启动清扫 automation-sweep.ts 的 sweepLegacyChatAutoSessions 清掉,这里是清扫失败
  *   残留的保险);
+ * - 知识库整理槽(huaanwork-kb-org- 前缀):固定单槽归知识库域维护,不得被项目旧会话
+ *   清扫误删;
  * - 非 topLevel 日志(origin=subagent / 有 parentSession 的子代理日志,与 session.list 口径一致:
  *   UI 从不展示它们,父日志仍含工具调用摘要,不随清扫误删)。
  */
 function shouldKeepSession(header: Record<string, unknown> | undefined, referencedSessionIds: ReadonlySet<string>): boolean {
   const id = typeof header?.id === 'string' ? header.id : undefined
   if (id && referencedSessionIds.has(id)) return true
-  if (id && (id.startsWith(AUTO_SESSION_PREFIX) || id.startsWith(LEGACY_CHAT_AUTO_SESSION_PREFIX))) return true
+  if (id && (id.startsWith(AUTO_SESSION_PREFIX) || id.startsWith(LEGACY_CHAT_AUTO_SESSION_PREFIX) || id.startsWith(KB_ORG_SESSION_PREFIX))) return true
   if (header?.origin === 'subagent' || typeof header?.parentSession === 'string') return true
   return false
 }

@@ -42,6 +42,7 @@ import type {
   DocumentRecordSummary,
   KnowledgeBaseRecord,
   KnowledgeErrorCode,
+  KnowledgeOrganizerPhase,
   KnowledgePhase,
   UpsertDocumentInput,
 } from './types.ts'
@@ -108,6 +109,13 @@ export interface KnowledgeSyncEngineOptions {
   readonly watchFactory?: SyncWatchFactory
   readonly detectCloudPlaceholder?: (filePath: string) => 'local' | 'dehydrated' | 'probe-unavailable'
   readonly cancelOrganizerForKb?: (kbId: string) => Promise<void>
+  /**
+   * 阶段 1 对账真正提交后的统一回调（M1-2 Task 6）。
+   *
+   * `startup` / `debounce` / `periodic` / `manual` / `resume` / `rebind` 六种 trigger
+   * 都只在事件写完、相位落定且 epoch 仍有效时调用；失败对账与 epoch 失效的中途返回不调用。
+   */
+  readonly onIndexCommitted?: (kbId: string) => void
   readonly afterCommitBeforeReopenForTest?: () => void
   readonly failWikiResetOnceForTest?: () => void
 }
@@ -158,6 +166,13 @@ export interface KnowledgeSyncEngine {
   onSystemResume(listener: () => void): () => void
   checkClockJump(): Promise<boolean>
   acquireLifecycleLock(kbId: string, mode: 'maintain' | 'delete'): Promise<() => void>
+  /**
+   * 写入四个整理相位之一。runtime 不 live、维护/删除锁或 recovery 相位时返回 false，
+   * 且不改动原相位；Host 只做委托。
+   */
+  setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean
+  /** 仅当当前仍是四个整理相位之一时恢复 `idlePhase(runtime)`，绝不覆盖同步/恢复相位。 */
+  clearOrganizerPhase(kbId: string): void
   getState(kbId: string): KnowledgeRuntimeState | undefined
   getMetricsForTest(kbId: string): SyncEngineMetrics
   setCaseSensitiveForTest(kbId: string, caseSensitive: boolean): void
@@ -235,6 +250,13 @@ function isSteadyPhase(phase: KnowledgePhase): boolean {
     || phase === 'source-unavailable'
 }
 
+function isOrganizerPhase(phase: KnowledgePhase): phase is KnowledgeOrganizerPhase {
+  return phase === 'waiting-turn-slot'
+    || phase === 'organizing'
+    || phase === 'blocked-no-model'
+    || phase === 'blocked-network'
+}
+
 function needsRecovery(phase: KnowledgePhase): boolean {
   return phase === 'wiki-reset-pending' || phase === 'index-error'
 }
@@ -289,6 +311,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     ?? ((sourceDir: string) => watch(sourceDir, { recursive: true }))
   const probeCloud = opts.detectCloudPlaceholder ?? ((filePath: string) => detectCloudPlaceholder(filePath))
   const cancelOrganizerForKb = opts.cancelOrganizerForKb
+  const onIndexCommitted = opts.onIndexCommitted
 
   const runtimes = new Map<string, Runtime>()
   const startInFlight = new Map<string, Promise<void>>()
@@ -313,6 +336,29 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
   function settlePhase(runtime: Runtime): void {
     if (runtime.maintaining) return
     if (needsRecovery(runtime.phase)) return
+    // 整理相位由 organizer 的 Host/SyncEngine 窄接口维护，对账结束不得刷回空闲相位。
+    if (isOrganizerPhase(runtime.phase)) return
+    runtime.phase = idlePhase(runtime)
+  }
+
+  /**
+   * 写入整理相位：live、非维护/删除锁、非 recovery 时才生效。
+   * 返回 false 表示未写入，调用方不应假设相位已改变。
+   */
+  function setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean {
+    const runtime = runtimes.get(kbId)
+    if (runtime === undefined || !isRuntimeLive(runtime)) return false
+    if (runtime.maintaining || runtime.stopped || locks.has(kbId)) return false
+    if (needsRecovery(runtime.phase)) return false
+    runtime.phase = phase
+    return true
+  }
+
+  /** 仅恢复仍由整理持有的相位；syncing/rebuilding/recovery 与其它同步相位原样保留。 */
+  function clearOrganizerPhase(kbId: string): void {
+    const runtime = runtimes.get(kbId)
+    if (runtime === undefined) return
+    if (!isOrganizerPhase(runtime.phase)) return
     runtime.phase = idlePhase(runtime)
   }
 
@@ -1091,6 +1137,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     await flushReport(kbDir, report)
     runtime.lastSyncedAt = new Date(nowWall()).toISOString()
     settlePhase(runtime)
+    // 阶段 1 的唯一提交点：事件已写完、相位已落定且 epoch 仍有效才通知下一阶段；
+    // 上面任何中途 return 与 `reconcile()` 的 catch 都不会走到这里。
+    if (runtime.epoch === epoch && isRuntimeLive(runtime)) onIndexCommitted?.(kbId)
   }
 
   async function flushReport(kbDir: string, report: SyncReport): Promise<void> {
@@ -1326,7 +1375,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     const runtime = requireRuntime(kbId)
     if (runtime.watchPaused) return
     runtime.watchPaused = true
-    if (!needsRecovery(runtime.phase)) runtime.phase = 'watch-paused'
+    if (!needsRecovery(runtime.phase) && !isOrganizerPhase(runtime.phase)) runtime.phase = 'watch-paused'
     runtime.epoch += 1
     // I-2 / M-4：同步取消所有错峰与写稳等待定时器，确保暂停返回后零后台扫盘与文件句柄。
     cancelRuntimeStaggerTimers(runtime)
@@ -1337,7 +1386,9 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     // 规格 §6.1：暂停应答返回前必须让在途 FileHandle 全部关闭。
     await pool.abortAndDrainKb(kbId)
     await runtime.chain.catch(() => undefined)
-    if (!runtime.maintaining && !needsRecovery(runtime.phase)) runtime.phase = 'watch-paused'
+    if (!runtime.maintaining && !needsRecovery(runtime.phase) && !isOrganizerPhase(runtime.phase)) {
+      runtime.phase = 'watch-paused'
+    }
   }
 
   async function resumeWatch(kbId: string, resumeOpts?: { readonly awaitReconcile?: boolean }): Promise<void> {
@@ -1346,7 +1397,7 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     runtime.watchFailed = false
     closeWatcher(runtime)
     ensureWatcher(runtime)
-    if (!needsRecovery(runtime.phase)) runtime.phase = idlePhase(runtime)
+    if (!needsRecovery(runtime.phase) && !isOrganizerPhase(runtime.phase)) runtime.phase = idlePhase(runtime)
     const reconcileTask = enqueueReconcile(runtime, { allowRename: true, trigger: 'resume' })
     if (resumeOpts?.awaitReconcile === false) {
       void reconcileTask.catch(() => undefined)
@@ -1819,6 +1870,8 @@ export function createKnowledgeSyncEngine(opts: KnowledgeSyncEngineOptions): Kno
     onSystemResume,
     checkClockJump,
     acquireLifecycleLock,
+    setOrganizerPhase,
+    clearOrganizerPhase,
     getState(kbId: string): KnowledgeRuntimeState | undefined {
       const runtime = runtimes.get(kbId)
       if (runtime === undefined) return undefined

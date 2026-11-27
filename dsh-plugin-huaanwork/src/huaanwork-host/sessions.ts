@@ -62,11 +62,12 @@ import {
 import type { ExpertTeamStore } from './expert-team/types.ts'
 import { disposeExpertTeamObservers } from './expert-team/observer.ts'
 import type { ExpertTeamCoordinator } from './expert-team/coordinator.ts'
+import { isKbOrganizeSessionId } from './knowledge/session-ids.ts'
 import { readHuaanworkSettings } from './settings.ts'
 import { resolveSessionModel } from './session-models.ts'
 import { listProjects, listTasks, setTaskModel } from './stores.ts'
 import type { QueueItem, TurnScheduler } from './turn-scheduler.ts'
-import { writableRootForSession } from './writable-root.ts'
+import { registeredKnowledgeBaseIds, writableRootForSession } from './writable-root.ts'
 import {
   assertSafePathSegment,
   neutralSessionRoot,
@@ -712,6 +713,7 @@ async function ensureChannelAgent(
       projects,
       tasks,
       headerCwd: typeof persisted?.cwd === 'string' ? persisted.cwd : undefined,
+      registeredKbIds: registeredKnowledgeBaseIds(),
     })
   }
   // 推导（含其中的磁盘读取）之后、写根与 create / resume 之前的最后一次取消与登记根复查。
@@ -1100,9 +1102,10 @@ function objectAtKind(params: unknown): 'expert-team' | undefined {
  */
 export { resolveFollowupClientMessageId }
 
-/** 会话来源:自动化运行会话(`huaanwork-auto-` 前缀)为 `'automation'`,其余为 `'advanced'`。 */
-export function turnOriginForSession(sessionId: string): 'automation' | 'advanced' {
-  return sessionId.startsWith(AUTO_SESSION_PREFIX) ? 'automation' : 'advanced'
+/** 会话来源:整理槽(`huaanwork-kb-org-`)为 `'knowledge'`,自动化运行会话(`huaanwork-auto-`)为 `'automation'`,其余为 `'advanced'`。 */
+export function turnOriginForSession(sessionId: string): 'automation' | 'knowledge' | 'advanced' {
+  if (sessionId.startsWith(AUTO_SESSION_PREFIX)) return 'automation'
+  return isKbOrganizeSessionId(sessionId) ? 'knowledge' : 'advanced'
 }
 
 /**
@@ -1208,16 +1211,31 @@ export function setReevaluateDueAutomations(fn: (() => void) | undefined): void 
 }
 
 /**
- * 只消费一次用户队列,再评估一次到期自动化,不释放任何回合名额
+ * 用户队列排空后的整理槽重评估(Task 6 注入执行器)。排在到期自动化评估之后,
+ * 让刚让出的名额先走用户队列与自动化,再决定是否排下一次整理。
+ */
+let reevaluateKbOrganize: (() => void) | undefined
+
+/** Task 6 在 index.ts 注入整理槽重评估函数;传 undefined 恢复空实现。 */
+export function setReevaluateKbOrganize(fn: (() => void) | undefined): void {
+  reevaluateKbOrganize = fn
+}
+
+/**
+ * 只消费一次用户队列,再评估一次到期自动化,最后重评估整理槽,不释放任何回合名额
  * (F1/GUI 3.4:settings.set 调大并发上限后的主动排空——等待项无需活动回合
  * release 即可出队;调度器按当前上限与根写者自检,名额已满时是 no-op)。
- * 与 `releaseAndDrain` 共用同一套顺序,不复制两份。
+ * 返回本轮真正出队的 `queueItemId`;启动所有权已交给 `startQueuedItem`,既有调用方
+ * 可以忽略返回值。
  */
-export function drainUserQueue(ctx: SessionRuntimeContext, routeCtx: RouteContext): void {
+export function drainUserQueue(ctx: SessionRuntimeContext, routeCtx: RouteContext): readonly string[] {
   const scheduler = ctx.huaanworkTurnScheduler
-  if (scheduler === undefined) return
-  for (const item of scheduler.drainQueue()) void startQueuedItem(ctx, routeCtx, item)
+  if (scheduler === undefined) return []
+  const started = scheduler.drainQueue()
+  for (const item of started) void startQueuedItem(ctx, routeCtx, item)
   reevaluateDueAutomations?.()
+  reevaluateKbOrganize?.()
+  return started.map((item) => item.queueItemId)
 }
 
 /**
@@ -1398,6 +1416,7 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
       projects,
       tasks,
       headerCwd: typeof header?.cwd === 'string' ? header.cwd : undefined,
+      registeredKbIds: registeredKnowledgeBaseIds(),
     })
   }
   if (!existsSync(root) || !statSync(root).isDirectory()) {
@@ -1446,7 +1465,25 @@ export async function sessionSend(ctx: SessionRuntimeContext, routeCtx: RouteCon
   })
   if (admitted.kind === 'error') throw new Error(admitted.reason)
   if (admitted.kind === 'queued') {
-    return { queued: true, waiting: true, started: false, sessionId, queueItemId: admitted.queueItemId }
+    // 只有抢占成功且调用前队列非空的新到项要求排空一次:腾出的名额先给更早的等待者。
+    const startedIds = admitted.drain ? drainUserQueue(ctx, routeCtx) : []
+    if (startedIds.includes(admitted.queueItemId)) {
+      // 本次已出队:启动所有权已交给 startQueuedItem(它会发 queue-start),这里不得再调 sendToAgent。
+      return {
+        queued: true,
+        waiting: false,
+        started: false,
+        sessionId,
+        queueItemId: admitted.queueItemId,
+      }
+    }
+    return {
+      queued: true,
+      waiting: true,
+      started: false,
+      sessionId,
+      queueItemId: admitted.queueItemId,
+    }
   }
 
   const releaseOnce = createReleaseOnce(ctx, routeCtx, sessionId)
@@ -1479,7 +1516,10 @@ export function sessionCancel(ctx: SessionRuntimeContext, routeCtx: RouteContext
 
 export async function sessionList(routeCtx: RouteContext, root: string | undefined): Promise<SessionSummary[]> {
   const sessions = await listSessions(join(routeCtx.dshHome, 'sessions'))
-  const topLevel = sessions.filter((session) => session.origin !== 'subagent' && !session.parentSession)
+  // 整理槽不是用户会话:侧栏列表永不展示(与子代理日志同一层级过滤)。
+  const topLevel = sessions.filter(
+    (session) => session.origin !== 'subagent' && !session.parentSession && !isKbOrganizeSessionId(session.id),
+  )
   return root ? topLevel.filter((session) => sessionWithinRoot(session, root)) : topLevel
 }
 

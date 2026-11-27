@@ -26,6 +26,7 @@ import type {
   ExpertTeamDispatchResult,
 } from '../huaanwork-host/expert-team/coordinator.ts'
 import type { ExpertTeamRunRegistry } from '../huaanwork-host/expert-team/runs.ts'
+import { isKbOrganizeSessionId } from '../huaanwork-host/knowledge/session-ids.ts'
 import { isTurnBoundaryMessage, type TurnAnchorStore } from '../huaanwork-host/turn-anchors.ts'
 import {
   attachAgentTools,
@@ -221,10 +222,14 @@ export function makeExpertTeamClaimed(ctx: ExpertTeamClaimedContext) {
     const sessionId = sessionIdOfAgentRef(agent)
     if (!sessionId) return
     try {
-      ctx.huaanworkTurnAnchors?.notePreStep(sessionId, [message], new Date().toISOString())
+      // 知识库整理槽不写回合锚点 LRU,也不挂载团队派工工具;若意外残留附件则同步摘除。
+      const organizer = isKbOrganizeSessionId(sessionId)
+      if (!organizer) {
+        ctx.huaanworkTurnAnchors?.notePreStep(sessionId, [message], new Date().toISOString())
+      }
       // mid-turn 注入(notice/context)不是回合边界:保持当前挂载,不重新判定。
       if (!isTurnBoundaryMessage(message)) return
-      const active = ctx.huaanworkExpertTeamRuns?.activeBySession(sessionId)
+      const active = organizer ? undefined : ctx.huaanworkExpertTeamRuns?.activeBySession(sessionId)
       const wantAttached =
         active !== undefined &&
         active.status === 'running' &&

@@ -81,6 +81,15 @@ declare module '@deepseek-ai/cordis' {
     huaanworkSessionModels: Map<string, string>
     /** 会话 → 可写根(Task 6);沙箱、工具执行与排队出队共用同一实例。 */
     huaanworkSessionRoots: Map<string, string>
+    /**
+     * 会话 → 本会话的显式工具白名单(知识库整理槽等按会话收窄的会话使用)。
+     *
+     * 只收窄工具可见性与可执行性,不是存活性信号:无条目即"不按会话收窄",既有
+     * 会话行为不变。消费方有且仅有两处——`present-as.ts` 收窄模型面可见集、
+     * `policy.ts` 在 `tools/pre-execute` / `tools.guard` 各自再判一次;两面互相
+     * 独立 fail closed,任何一面被跳过都不会放行名单外的工具。
+     */
+    huaanworkSessionToolAllow: Map<string, readonly string[]>
     /** 唯一回合调度器(Task 6);用户发送与自动化准入共用。 */
     huaanworkTurnScheduler: TurnScheduler
     /** 会话 → 当前回合锚点(设计「回合归属」);pre-step 钩子与后续进度投影共读同一实例。 */
@@ -121,6 +130,7 @@ export const HUAANWORK_CONTEXT_PROPS = [
   'huaanworkExpertTeamCoordinator',
   'huaanworkSessionModels',
   'huaanworkSessionRoots',
+  'huaanworkSessionToolAllow',
   'huaanworkTurnScheduler',
   'huaanworkTurnAnchors',
   'huaanworkSystemSkillLeases',
@@ -206,6 +216,7 @@ export function installHuaanworkHolders(
   ctx.huaanworkAgentPackageTeamRequests = new Map<string, AgentPackageSubagentRequest>()
   ctx.huaanworkPackageChildSessions = new Set<string>()
   ctx.huaanworkPackageChildAllow = new Map<string, readonly string[]>()
+  ctx.huaanworkSessionToolAllow = new Map<string, readonly string[]>()
   ctx.huaanworkAgentCatalog = { current: { items: [] } }
   ctx.huaanworkEmit = emit
   ctx.huaanworkTurnAnchors = createTurnAnchorStore()

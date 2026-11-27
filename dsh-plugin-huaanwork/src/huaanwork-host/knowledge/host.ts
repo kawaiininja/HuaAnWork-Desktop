@@ -37,14 +37,17 @@ import type { KnowledgeSyncEngine, SyncWatchFactory } from './sync-engine.ts'
 import { MAX_KNOWLEDGE_BASES } from './types.ts'
 import type {
   ChunkLocator,
+  ChunkWindowItem,
   DocumentRecordSummary,
   GetChunkResult,
   KnowledgeBaseRecord,
   KnowledgeBaseStats,
   KnowledgeBaseSummary,
   KnowledgeEventRecord,
+  KnowledgeOrganizerPhase,
   ListDocsFilter,
   ListDocsResult,
+  PendingOrganizeBatch,
 } from './types.ts'
 import { neutralKnowledgeRootPath } from '../workspace-state.ts'
 
@@ -110,6 +113,13 @@ export interface KnowledgeOrganizerHooks {
   notifyPending?(kbId: string): void
 }
 
+/** 一批整理结算：冻结快照 + 真正推进的文档 + 真正删除的墓碑行。 */
+export interface KnowledgeOrganizeBatchSettlement {
+  readonly batch: PendingOrganizeBatch
+  readonly organizedDocIds: readonly string[]
+  readonly clearedTombstoneIds: readonly string[]
+}
+
 export interface KnowledgeHost {
   start(): Promise<void>
   list(): Promise<readonly KnowledgeBaseSummary[]>
@@ -129,9 +139,63 @@ export interface KnowledgeHost {
   setOrganizerHooks(hooks: KnowledgeOrganizerHooks): void
   /** M1-3 注入：删库已提交后的 best-effort 清理钩子（如会话挂载清理），异常仅记告警不撤销删库。 */
   setRemovalHook(hook: (kbId: string) => Promise<void>): void
+  /** 已登记且不在删除中的知识库 id 副本；调用方 mutate 不影响 Host 注册表。 */
+  getRegisteredKnowledgeBaseIds(): ReadonlySet<string>
+  /** 手动整理前置校验：未知/删除/维护/recovery 相位拒绝；不检查 autoOrganize。 */
+  assertOrganizeAllowed(kbId: string): void
+  /** 写入四个整理相位之一；runtime 不 live、维护/删除锁或 recovery 时返回 false。 */
+  setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean
+  /** 仅当当前仍是整理相位时恢复空闲相位；绝不覆盖同步/恢复相位。 */
+  clearOrganizerPhase(kbId: string): void
+  /** 阶段 2 候选：自动开启库或本次手动集合中的库，排除删除/维护与两种恢复相位。 */
+  listOrganizeCandidates(manualKbIds?: ReadonlySet<string>): readonly KnowledgeBaseRecord[]
+  /** 只读查询下一批（不写任何状态），供调度器在准入前判断空批与退避。 */
+  peekPendingOrganizeBatch(kbId: string, nowMs: number): Promise<PendingOrganizeBatch>
+  /** 重新查询并冻结唯一的 open 批次；已有 open 批时抛 `knowledge-base-busy`。 */
+  openOrganizeBatch(kbId: string, nowMs: number): Promise<PendingOrganizeBatch>
+  /** 当前冻结快照；没有 open 批时抛 `knowledge-organize-batch-not-open`。 */
+  getOpenOrganizeBatch(kbId: string): PendingOrganizeBatch
+  /** 原子取出并删除当前批，返回真正推进文档与真正删行的墓碑 id。 */
+  closeOrganizeBatch(kbId: string): KnowledgeOrganizeBatchSettlement
+  readOrganizeDoc(kbId: string, docId: string, startOrdinal: number, limit: number): Promise<readonly ChunkWindowItem[]>
+  markOrganizeProcessed(kbId: string, docId: string, sha256: string): Promise<{ readonly updated: boolean }>
+  clearOrganizeTombstones(kbId: string, docIds: readonly string[]): Promise<readonly string[]>
+  recordOrganizeFailure(kbId: string, docId: string, sha256: string, error: string, nowMs: number): Promise<{ readonly attempts: number; readonly retryAfter: number | null }>
+  resetOrganizeFailures(kbId: string, docId?: string): Promise<void>
   isWorkersRunning(): boolean
   isWatchingForTest(kbId: string): boolean
   dispose(): Promise<void>
+}
+
+/** 单库当前 open 批次：冻结快照与结算时真实推进/删行 id。 */
+interface OpenOrganizeBatchState {
+  readonly batch: PendingOrganizeBatch
+  readonly organizedDocIds: Set<string>
+  readonly clearedTombstoneIds: Set<string>
+}
+
+/** 未 open 批次时的具名错误；工具与执行器按稳定 message 前缀匹配。 */
+class KnowledgeOrganizeBatchNotOpenError extends Error {
+  constructor(kbId: string) {
+    super(`knowledge-organize-batch-not-open: ${kbId}`)
+    this.name = 'KnowledgeOrganizeBatchNotOpenError'
+  }
+}
+
+/** 深拷贝后逐层冻结：open 快照不可被调用方改写。 */
+function freezeBatchSnapshot<T>(value: T): T {
+  if (typeof value === 'object' && value !== null) {
+    for (const child of Object.values(value)) freezeBatchSnapshot(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
+function copyPendingOrganizeBatch(batch: PendingOrganizeBatch): PendingOrganizeBatch {
+  return freezeBatchSnapshot({
+    docs: batch.docs.map(item => ({ ...item })),
+    tombstones: batch.tombstones.map(item => ({ ...item })),
+  })
 }
 
 function normalizeCap(value: number | undefined): number {
@@ -155,6 +219,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
   const statsCache = new Map<string, KnowledgeBaseStats>()
   const deletingIds = new Set<string>()
   const maintainingIds = new Set<string>()
+  /** 每库唯一 open 批次；`open` 后冻结，`close` 原子取出并删除。 */
+  const openOrganizeBatches = new Map<string, OpenOrganizeBatchState>()
 
   let organizerHooks: KnowledgeOrganizerHooks | undefined
   let removalHook: ((kbId: string) => Promise<void>) | undefined
@@ -176,6 +242,10 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     // 控制器裁决 M-4：整理取消也委托引擎停机序列；钩子可在 start 前后注入。
     cancelOrganizerForKb: async (kbId: string) => {
       await organizerHooks?.cancelForKb(kbId)
+    },
+    // 阶段 1 提交后统一通知整理排期；钩子未注入时保持无副作用（Host 可独立使用）。
+    onIndexCommitted: (kbId: string) => {
+      notifyOrganizerPending(kbId)
     },
     ...(opts.debounceMs === undefined ? {} : { debounceMs: opts.debounceMs }),
     ...(opts.writeStableMs === undefined ? {} : { writeStableMs: opts.writeStableMs }),
@@ -426,6 +496,9 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       await rm(kbRoot, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
+    // 注册表已提交：启动对账可能早于 commit 完成（当时本库还不是候选），
+    // 这里补一次全局排期，保证 create 成功后必然评估阶段 2（R2-4）。
+    notifyOrganizerPending(id)
     return record
   }
 
@@ -462,6 +535,10 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
     maintainingIds.add(kbId)
+    /** 重绑已在引擎内落地（落盘 + 对账返回）：解锁后必须补偿一次整理排期。 */
+    let rebindSucceeded = false
+    /** 整个 `update` 正常返回；任何失败路径都不得触发补偿通知。 */
+    let updateSucceeded = false
     try {
       let next: KnowledgeBaseRecord = record
       /** 已经随重绑落盘并同步进内存的记录（避免重复写同一内容）。 */
@@ -527,6 +604,7 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
         }
         next = rebound
         persistedNext = rebound
+        rebindSucceeded = true
       }
 
       const wantPause = patch.watchPaused === true && !next.watchPaused
@@ -556,9 +634,13 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
       if (wantResume) {
         await engine.resumeWatch(kbId, { awaitReconcile: false })
       }
+      updateSucceeded = true
       return next
     } finally {
       maintainingIds.delete(kbId)
+      // 重绑对账在维护中发出的通知会被 organizer 按维护跳过；解锁后必须补偿，
+      // 但失败（含重绑之外的后续步骤失败）一律不通知。
+      if (rebindSucceeded && updateSucceeded) notifyOrganizerPending(kbId)
     }
   }
 
@@ -596,6 +678,8 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
         recordsVersion += 1
         throw error
       }
+      // 删库已提交：该库不可能再有整理批次，丢弃残留 open 状态。
+      openOrganizeBatches.delete(kbId)
       if (removalHook !== undefined) {
         try {
           await removalHook(kbId)
@@ -627,12 +711,21 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     assertNotDeleting(kbId)
     assertNotMaintaining(kbId)
     maintainingIds.add(kbId)
+    let rebuilt = false
     try {
       await engine.rebuildIndex(kbId)
+      rebuilt = true
     } finally {
       maintainingIds.delete(kbId)
     }
     await refreshStats(kbId)
+    // 只有成功重建且不在两种恢复相位时才排期；失败路径不通知。
+    if (rebuilt) {
+      const phase = engine.getState(kbId)?.phase
+      if (phase !== 'wiki-reset-pending' && phase !== 'index-error') {
+        notifyOrganizerPending(kbId)
+      }
+    }
   }
 
   async function listDocs(kbId: string, filter?: ListDocsFilter): Promise<ListDocsResult> {
@@ -640,6 +733,164 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     requireRecord(kbId)
     assertNotDeleting(kbId)
     return await storage.listDocs(kbId, filter)
+  }
+
+  function getRegisteredKnowledgeBaseIds(): ReadonlySet<string> {
+    return new Set([...records.keys()].filter(kbId => !deletingIds.has(kbId)))
+  }
+
+  /**
+   * 手动整理前置校验（M1-2 Task 5）：直接复用既有记录与锁集合，不复制状态机；
+   * recovery 相位按同名 `KnowledgeSyncError` 拒绝。`autoOrganize` 不参与判断。
+   */
+  function assertOrganizeAllowed(kbId: string): void {
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    assertNotMaintaining(kbId)
+    const phase = engine.getState(kbId)?.phase
+    if (phase === 'wiki-reset-pending' || phase === 'index-error') {
+      throw new KnowledgeSyncError(phase, `knowledge base ${kbId} is in ${phase}`)
+    }
+  }
+
+  /** 整理相位窄接口只做委托，状态机留在 SyncEngine。 */
+  function setOrganizerPhase(kbId: string, phase: KnowledgeOrganizerPhase): boolean {
+    return engine.setOrganizerPhase(kbId, phase)
+  }
+
+  function clearOrganizerPhase(kbId: string): void {
+    engine.clearOrganizerPhase(kbId)
+  }
+
+  /**
+   * 阶段 2 候选（规格 §8.1）：只按注册表与运行相位筛选，不读 Storage。
+   * `watch-paused` / `watch-failed` / `source-unavailable` 不阻断整理；只有
+   * 删除、维护与 `wiki-reset-pending` / `index-error` 被排除。
+   */
+  function listOrganizeCandidates(manualKbIds?: ReadonlySet<string>): readonly KnowledgeBaseRecord[] {
+    const candidates: KnowledgeBaseRecord[] = []
+    for (const record of records.values()) {
+      if (deletingIds.has(record.id) || maintainingIds.has(record.id)) continue
+      const phase = engine.getState(record.id)?.phase
+      if (phase === 'wiki-reset-pending' || phase === 'index-error') continue
+      if (!record.autoOrganize && manualKbIds?.has(record.id) !== true) continue
+      candidates.push(record)
+    }
+    return candidates
+  }
+
+  async function peekPendingOrganizeBatch(kbId: string, nowMs: number): Promise<PendingOrganizeBatch> {
+    await waitRegistryLoaded()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    assertNotMaintaining(kbId)
+    return await storage.getPendingOrganizeBatch(kbId, nowMs)
+  }
+
+  /**
+   * 再查询一次并冻结唯一当前批。查询期间若记录被删除或进入维护，绝不把批次写回
+   * Map（不复活已删库的整理回合）。
+   */
+  async function openOrganizeBatch(kbId: string, nowMs: number): Promise<PendingOrganizeBatch> {
+    await waitRegistryLoaded()
+    assertNotDisposed()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    assertNotMaintaining(kbId)
+    if (openOrganizeBatches.has(kbId)) {
+      throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kbId} already has an open organize batch`)
+    }
+    const fetched = await storage.getPendingOrganizeBatch(kbId, nowMs)
+    assertNotDisposed()
+    if (records.get(kbId) === undefined) {
+      throw new KnowledgeSyncError(
+        'knowledge-base-not-found',
+        `knowledge base ${kbId} was removed while opening its organize batch`,
+      )
+    }
+    assertNotDeleting(kbId)
+    assertNotMaintaining(kbId)
+    if (openOrganizeBatches.has(kbId)) {
+      throw new KnowledgeSyncError('knowledge-base-busy', `knowledge base ${kbId} already has an open organize batch`)
+    }
+    const batch = copyPendingOrganizeBatch(fetched)
+    openOrganizeBatches.set(kbId, { batch, organizedDocIds: new Set(), clearedTombstoneIds: new Set() })
+    return batch
+  }
+
+  function getOpenOrganizeBatch(kbId: string): PendingOrganizeBatch {
+    const open = openOrganizeBatches.get(kbId)
+    if (open === undefined) throw new KnowledgeOrganizeBatchNotOpenError(kbId)
+    return open.batch
+  }
+
+  function closeOrganizeBatch(kbId: string): KnowledgeOrganizeBatchSettlement {
+    const open = openOrganizeBatches.get(kbId)
+    if (open === undefined) throw new KnowledgeOrganizeBatchNotOpenError(kbId)
+    openOrganizeBatches.delete(kbId)
+    return {
+      batch: open.batch,
+      organizedDocIds: [...open.organizedDocIds],
+      clearedTombstoneIds: [...open.clearedTombstoneIds],
+    }
+  }
+
+  async function readOrganizeDoc(
+    kbId: string,
+    docId: string,
+    startOrdinal: number,
+    limit: number,
+  ): Promise<readonly ChunkWindowItem[]> {
+    await waitRegistryLoaded()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    return await storage.getDocChunks(kbId, docId, startOrdinal, limit)
+  }
+
+  async function markOrganizeProcessed(
+    kbId: string,
+    docId: string,
+    sha256: string,
+  ): Promise<{ readonly updated: boolean }> {
+    await waitRegistryLoaded()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    // 固定卡片路径；`markOrganizedAtomic` 仍只按 `doc_id = ? AND sha256 = ?` 原子推进。
+    const result = await storage.markOrganizedAtomic(kbId, docId, sha256, `docs/${docId}.md`)
+    if (result.updated) openOrganizeBatches.get(kbId)?.organizedDocIds.add(docId)
+    return result
+  }
+
+  async function clearOrganizeTombstones(kbId: string, docIds: readonly string[]): Promise<readonly string[]> {
+    await waitRegistryLoaded()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    const deleted = await storage.clearOrganizeTombstones(kbId, docIds)
+    const open = openOrganizeBatches.get(kbId)
+    if (open !== undefined) {
+      for (const docId of deleted) open.clearedTombstoneIds.add(docId)
+    }
+    return deleted
+  }
+
+  async function recordOrganizeFailure(
+    kbId: string,
+    docId: string,
+    sha256: string,
+    error: string,
+    nowMs: number,
+  ): Promise<{ readonly attempts: number; readonly retryAfter: number | null }> {
+    await waitRegistryLoaded()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    return await storage.recordOrganizeFailure(kbId, docId, sha256, error, nowMs)
+  }
+
+  async function resetOrganizeFailures(kbId: string, docId?: string): Promise<void> {
+    await waitRegistryLoaded()
+    requireRecord(kbId)
+    assertNotDeleting(kbId)
+    await storage.resetOrganizeFailures(kbId, docId)
   }
 
   async function search(input: {
@@ -788,6 +1039,15 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     organizerHooks = hooks
   }
 
+  /** 提交后的整理排期通知：钩子异常只告警，绝不把已提交的操作改判为失败。 */
+  function notifyOrganizerPending(kbId: string): void {
+    try {
+      organizerHooks?.notifyPending?.(kbId)
+    } catch (error) {
+      console.warn(`[knowledge] organize notification failed for ${kbId}: ${String(error)}`)
+    }
+  }
+
   function setRemovalHook(hook: (kbId: string) => Promise<void>): void {
     removalHook = hook
   }
@@ -845,6 +1105,20 @@ export function createKnowledgeHost(opts: CreateKnowledgeHostOptions): Knowledge
     onSystemResume,
     setOrganizerHooks,
     setRemovalHook,
+    getRegisteredKnowledgeBaseIds,
+    assertOrganizeAllowed,
+    setOrganizerPhase,
+    clearOrganizerPhase,
+    listOrganizeCandidates,
+    peekPendingOrganizeBatch,
+    openOrganizeBatch,
+    getOpenOrganizeBatch,
+    closeOrganizeBatch,
+    readOrganizeDoc,
+    markOrganizeProcessed,
+    clearOrganizeTombstones,
+    recordOrganizeFailure,
+    resetOrganizeFailures,
     isWorkersRunning,
     isWatchingForTest,
     dispose,

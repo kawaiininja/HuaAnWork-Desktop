@@ -146,6 +146,13 @@ function decide(input: ToolCall, mode: GuardMode, seam: Seam): Internal {
     // 不落到 default 在 ask/smart 逐次弹审批。
     case "expert_team_dispatch":
       return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
+    // 知识库整理槽的三个宿主工具：整理会话没有审批界面(也绝不登记无人值守)，
+    // 因此与 result_present 同一显式分支——挂载即 allow，未挂载 deny，任何档位都
+    // 不返回 ask，否则整批会卡在没人应答的审批上。
+    case "kb_org_get_delta":
+    case "kb_org_read_doc":
+    case "kb_org_mark_organized":
+      return input.attached ? ALLOW : deny(reasonToolUnattached(input.name));
     default:
       return input.attached ? (mode === "full" ? ALLOW : askOrDeny(seam)) : deny(reasonToolUnattached(input.name));
   }

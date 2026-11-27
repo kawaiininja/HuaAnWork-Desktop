@@ -12,6 +12,11 @@ import {
 import { normalizeTodoEntries } from "../client-huaanwork/logic/todoProjection.ts";
 import { acceptanceInjectToolName, acceptanceToolFailure } from "../huaanwork-host/acceptance-hooks.ts";
 import type { GoalPhase } from "../client-huaanwork/logic/goalRound.ts";
+import {
+  noteKnowledgeOrganizerActivity,
+  noteKnowledgeOrganizerError,
+} from "../huaanwork-host/knowledge/organizer-activity.ts";
+import { isKbOrganizeSessionId } from "../huaanwork-host/knowledge/session-ids.ts";
 import type { SubagentRunRegistry } from "../huaanwork-host/subagent-runs.ts";
 import type { ExpertTeamRunRegistry } from "../huaanwork-host/expert-team/runs.ts";
 import {
@@ -143,19 +148,25 @@ export function apply(ctx: Context): void {
     (async (execution: ToolExecution, next: () => Promise<ToolResult>) => {
       const sessionId = sessionIdOfAgentRef(execution.agent);
       const child = childActivityOf(ctx, sessionId);
+      // 整理槽(规格 §8.1):工具照常执行一次,活动心跳先进观察器,UI 事件一律不广播。
+      const organizer = child === undefined && isKbOrganizeSessionId(sessionId);
       const tool = { name: execution.name, ...(execution.callId === undefined ? {} : { callId: execution.callId }) };
       if (child === undefined) {
-        const roundKey = roundKeyFor(roundKeys, sessionId);
-        const anchor = sessionId === undefined ? undefined : ctx.huaanworkTurnAnchors?.current(sessionId);
-        emit(ctx, {
-          event: "tool/start",
-          name: execution.name,
-          ...(execution.callId === undefined ? {} : { callId: execution.callId }),
-          ...(sessionId === undefined ? {} : { sessionId }),
-          ...(roundKey === undefined ? {} : { roundKey }),
-          ...(anchor?.clientMessageId === undefined ? {} : { clientMessageId: anchor.clientMessageId }),
-          ...startDetail(execution),
-        });
+        if (organizer) {
+          noteKnowledgeOrganizerActivity(sessionId, "tool/start");
+        } else {
+          const roundKey = roundKeyFor(roundKeys, sessionId);
+          const anchor = sessionId === undefined ? undefined : ctx.huaanworkTurnAnchors?.current(sessionId);
+          emit(ctx, {
+            event: "tool/start",
+            name: execution.name,
+            ...(execution.callId === undefined ? {} : { callId: execution.callId }),
+            ...(sessionId === undefined ? {} : { sessionId }),
+            ...(roundKey === undefined ? {} : { roundKey }),
+            ...(anchor?.clientMessageId === undefined ? {} : { clientMessageId: anchor.clientMessageId }),
+            ...startDetail(execution),
+          });
+        }
       } else {
         child.runs.startTool(child.childId, tool);
         // 验收钩子:在真实工具旁注入一个并发工具,用于观察 callId 独立记录与 +N。
@@ -165,6 +176,7 @@ export function apply(ctx: Context): void {
           child.runs.startTool(child.childId, { name: `${injectedName}-b`, callId: "acceptance-injected-b" });
         }
       }
+      // 整理分支同样必须恰好执行一次工具本身;不得 return 掉 next()。
       const result = await next();
       const capped = capResult(result);
       if (child !== undefined) {
@@ -172,6 +184,12 @@ export function apply(ctx: Context): void {
         child.runs.endTool(child.childId, tool);
         if (acceptanceToolFailure()) {
           child.runs.noteChildError(child.childId, `acceptance injected tool failure: ${execution.name}`);
+        }
+      } else if (organizer) {
+        noteKnowledgeOrganizerActivity(sessionId, "tool/end");
+        // diff 心跳只记在原本会做 diff 快照的位置,但不执行 git(整理槽无 git 工具)。
+        if (execution.name === "git_diff" || DIFF_AFTER.has(execution.name)) {
+          noteKnowledgeOrganizerActivity(sessionId, "diff");
         }
       } else {
         emit(ctx, {
@@ -207,6 +225,11 @@ export function apply(ctx: Context): void {
     }
     if (event?.type === "compaction/end") {
       if (objectValue(event.data).error !== undefined) return;
+      // 整理槽:压缩完成只作为活动心跳,不写用户对话流。
+      if (isKbOrganizeSessionId(sessionId)) {
+        noteKnowledgeOrganizerActivity(sessionId, "compaction/done");
+        return;
+      }
       emit(ctx, { event: "compaction/done", ...scope });
       return;
     }
@@ -265,6 +288,8 @@ export function apply(ctx: Context): void {
       child.runs.childIdle(child.childId);
       return;
     }
+    // 整理槽的正常收尾由整理执行器自己结算,不向用户对话流广播 session/end。
+    if (isKbOrganizeSessionId(sessionId)) return;
     // 正常完成轮次的轮间 idle:仅 goal.phase === 'active' 的会话保留系统技能租约。
     if (sessionId !== undefined) releaseSystemSkillLeaseOnIdle(ctx, sessionId);
     emit(ctx, { event: "session/end", ok: true, ...(sessionId === undefined ? {} : { sessionId }) });
@@ -276,6 +301,12 @@ export function apply(ctx: Context): void {
     if (child !== undefined) {
       // 子代理错误只留清理过的一行文案;终态由权威 result/end 决定,不在此结束回合。
       child.runs.noteChildError(child.childId, childErrorMessage(payload?.error));
+      return;
+    }
+    // 整理槽:错误只交给当前批次 observer(含 abort 形状,由 organizer 判定是否只是取消),
+    // 不广播 session/end,也不动系统技能租约 / 专家团(整理槽不持有它们)。
+    if (isKbOrganizeSessionId(sessionId)) {
+      noteKnowledgeOrganizerError(sessionId, errorMessage(payload?.error));
       return;
     }
     // 父会话 abort 与异常都绝不把系统技能租约泄漏到下一回合。上游
@@ -309,12 +340,28 @@ async function* mapTokens(
   // 非回合流（compaction / session-title 等辅助模型调用）的 text-delta / reasoning 不是回合产出：
   // 照常透传 chunks，但不发 token 或 reasoning 事件——否则会被运行收集器按 sessionId 误归集为该次任务的产出。
   // 已知 child 的回合流同理只驱动 run 投影:正文与思考正文都不进入父消息流。
+  // 整理槽(规格 §8.1):心跳进活动观察器,正文/思考不进用户对话流,但模型流必须完整消费并原样 yield。
   const roundKey = roundKeyFor(roundKeys, sessionId);
   const roundField = roundKey === undefined ? {} : { roundKey };
+  const organizer = isKbOrganizeSessionId(sessionId);
   const child = purpose === undefined ? childActivityOf(ctx, sessionId) : undefined;
   for await (const chunk of stream) {
     if (purpose === undefined) {
-      if (child === undefined) {
+      if (organizer) {
+        if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+          noteKnowledgeOrganizerActivity(sessionId, "token");
+        }
+        if (chunk?.type === "reasoning-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
+          noteKnowledgeOrganizerActivity(sessionId, "reasoning");
+        }
+        if (
+          chunk?.type === "block-end"
+          && chunk.block?.type === "reasoning"
+          && typeof chunk.block.text === "string"
+        ) {
+          noteKnowledgeOrganizerActivity(sessionId, "reasoning");
+        }
+      } else if (child === undefined) {
         if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text.length > 0) {
           emit(ctx, { event: "token", text: chunk.text, ...(sessionId === undefined ? {} : { sessionId }), ...roundField });
         }

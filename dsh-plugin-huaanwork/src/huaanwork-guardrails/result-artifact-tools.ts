@@ -36,6 +36,7 @@ import {
 } from '../huaanwork-host/expert-team/coordinator.ts'
 import { canSubmitPrimaryArtifact } from '../huaanwork-host/expert-team/orchestration.ts'
 import type { ExpertTeamRunRegistry } from '../huaanwork-host/expert-team/runs.ts'
+import { isKbOrganizeSessionId } from '../huaanwork-host/knowledge/session-ids.ts'
 import type { TurnAnchorStore } from '../huaanwork-host/turn-anchors.ts'
 import {
   attachAgentTools,
@@ -225,7 +226,11 @@ export function makeResultPresentClaimed(ctx: ResultPresentClaimedContext) {
     const sessionId = sessionIdOfAgentRef(agent)
     if (!sessionId) return
     try {
-      const anchor = ctx.huaanworkTurnAnchors?.notePreStep(sessionId, [message], new Date().toISOString())
+      // 知识库整理槽不参与用户回合锚点,避免 agent/inbox/claimed 绕过 installTurnAnchorHooks
+      // 写入 256 条 LRU(session/disposed 跳过整理槽清理);同时保持 wantAttached=false 摘除附件。
+      const anchor = isKbOrganizeSessionId(sessionId)
+        ? undefined
+        : ctx.huaanworkTurnAnchors?.notePreStep(sessionId, [message], new Date().toISOString())
       // 仅会话模式的团队回合不挂 result_present;Artifact 模式团队与普通高级会话保持原行为。
       const teamRun = anchor === undefined
         ? undefined

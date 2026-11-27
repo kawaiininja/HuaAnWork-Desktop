@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { preExecuteExplained, type GuardMode, type ToolCall } from "@huaanwork/policy";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
@@ -9,6 +10,7 @@ import { isAgentToolAttached, isHostAttached, isMcpAttached, type AttachmentMaps
 import { GIT_SNAPSHOT_BUDGET_MS } from "./git-budget.ts";
 import { sessionWorkspaceRoot } from "./sandbox-cwd.ts";
 import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
+import { isKbOrganizeSessionId } from "../huaanwork-host/knowledge/session-ids.ts";
 
 /**
  * 按会话挂载的创建/运行工具:智能体创建挂 agent_propose/agent_commit,`@slug` 运行
@@ -24,6 +26,10 @@ import { parentSessionOf } from "../huaanwork-host/child-sessions.ts";
  * `expert_team_dispatch` 是专家团团长的派工工具:附件只在「进行中的团队回合」按
  * 团队运行、回合锚与租约挂载,与 `result_present` 同一显式分支;它不得进入全局
  * ALLOWED_TOOLS,普通 `@智能体` 会话的既有语义不变。
+ *
+ * `kb_org_get_delta` / `kb_org_read_doc` / `kb_org_mark_organized` 是知识库整理槽的
+ * 三个宿主工具:整理会话没有审批界面、也绝不登记无人值守,所以同样走"挂载即 allow、
+ * 未挂载 deny"的显式分支,永不落到 ask。
  */
 const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "agent_propose",
@@ -34,6 +40,9 @@ const SESSION_ATTACHED_TOOLS: ReadonlySet<string> = new Set([
   "skill_commit",
   "result_present",
   "expert_team_dispatch",
+  "kb_org_get_delta",
+  "kb_org_read_doc",
+  "kb_org_mark_organized",
 ]);
 
 type ToolExecution = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/tools/src/index.ts:376
@@ -70,6 +79,8 @@ export type UnattendedHolder = Map<string, UnattendedScope>;
 
 type Context = {
   huaanworkWorkspaceRoot?: { current: string };
+  /** 会话 id → 本会话可写根;整理槽缺根由 `sessionWorkspaceRoot` fail closed。 */
+  huaanworkSessionRoots?: Map<string, string>;
   huaanworkAllowedOnce?: Set<string>;
   /** 保留兼容旧调用方；护栏设置与审计已改由 huaanworkProfileDir 权威解析。 */
   huaanworkDshHome?: string;
@@ -85,6 +96,12 @@ type Context = {
    * 只读限制集，不是存活性信号——条目缺席即无限制，现有判定不变。
    */
   huaanworkPackageChildAllow?: Map<string, readonly string[]>;
+  /**
+   * 按会话的显式工具白名单(知识库整理槽等;`holders.ts` 在 boot 时装一张空 Map)。
+   * 有条目即限制集:条目外的工具在执行期直接拒绝,与 `present-as.ts` 的可见性
+   * 收窄互相独立。只读限制集,不是存活性信号——条目缺席即无限制,现有判定不变。
+   */
+  huaanworkSessionToolAllow?: Map<string, readonly string[]>;
   on(
     event: "tools/pre-execute",
     listener: (
@@ -122,6 +139,16 @@ export function apply(ctx: Context): void {
     if (lineageAllow !== undefined && !lineageAllow.includes(execution.name)) {
       return { kind: "deny", reason: `huaanwork-policy: 智能体包链路会话不允许使用工具 ${execution.name}` };
     }
+    // 会话级显式白名单与整理槽写目标附加检查:任一命中都直接拒绝,不看档位、不降级
+    // 为无人值守,也不依赖 present-as 是否已经把工具从模型面收窄掉。
+    const sessionDenial = sessionToolAllowDenial(ctx, execution);
+    if (sessionDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${sessionDenial}` };
+    const rootDenial = organizerRootDenial(ctx, execution);
+    if (rootDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${rootDenial}` };
+    const traversalDenial = organizerParentTraversalDenial(execution);
+    if (traversalDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${traversalDenial}` };
+    const organizerDenial = organizerWriteDenial(ctx, execution);
+    if (organizerDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${organizerDenial}` };
     const mode = readGuardMode(ctx.huaanworkProfileDir);
     const { decision, reason } = preExecuteExplained(toToolCall(execution, ctx), mode);
     // reason 面向模型：说明拒绝原因与可行替代（如「去掉管道拆成单条命令」），让模型能自我纠正，
@@ -143,6 +170,15 @@ export function apply(ctx: Context): void {
     if (lineageAllow !== undefined && !lineageAllow.includes(execution.name)) {
       return `huaanwork-guard: 智能体包链路会话不允许使用工具 ${execution.name}`;
     }
+    // 与 pre-execute 同一层判定:pre-execute 被 boot-overlay 剥离时,guard 仍独立拒绝。
+    const sessionDenial = sessionToolAllowDenial(ctx, execution);
+    if (sessionDenial !== undefined) return `huaanwork-guard: ${sessionDenial}`;
+    const rootDenial = organizerRootDenial(ctx, execution);
+    if (rootDenial !== undefined) return `huaanwork-guard: ${rootDenial}`;
+    const traversalDenial = organizerParentTraversalDenial(execution);
+    if (traversalDenial !== undefined) return `huaanwork-guard: ${traversalDenial}`;
+    const organizerDenial = organizerWriteDenial(ctx, execution);
+    if (organizerDenial !== undefined) return `huaanwork-guard: ${organizerDenial}`;
     const mode = readGuardMode(ctx.huaanworkProfileDir);
     const call = toToolCall(execution, ctx);
     // guard 的 deny 集合 == pre-execute 的 deny ∪ would-be-ask（guard 不能表达 ask），
@@ -157,6 +193,177 @@ export function apply(ctx: Context): void {
     }
     return decision === "deny" ? `huaanwork-guard: ${reason ?? "策略拒绝"}` : undefined;
   });
+}
+
+/**
+ * 会话级显式白名单的执行期判定(知识库整理槽等)。`present-as.ts` 收窄模型面只是
+ * 第一层:附件/上游 scope 都可能把工具重新挂回来,执行侧必须读同一份名单再判一次。
+ * 没有本会话条目即不限制,既有会话判定逐字节不变。
+ */
+function sessionToolAllowDenial(ctx: Pick<Context, "huaanworkSessionToolAllow">, execution: ToolExecution): string | undefined {
+  const sessionAllow = ctx.huaanworkSessionToolAllow?.get(sessionIdOfAgentRef(execution.agent) ?? "");
+  if (sessionAllow === undefined) return undefined;
+  if (sessionAllow.includes(execution.name)) return undefined;
+  return `工具 ${execution.name} 不在当前会话的工具白名单内：请改用白名单内的工具`;
+}
+
+/** 整理会话向平台临时目录写入的拒绝原因(面向模型的整改建议)。 */
+export const REASON_ORGANIZER_TEMP =
+  "知识库整理会话不允许写入操作系统临时目录：请改为写入知识库 wiki/ 目录内的路径";
+
+/** 整理会话向符号链接(含指向库外的悬空链接)写入的拒绝原因。 */
+export const REASON_ORGANIZER_SYMLINK =
+  "知识库整理会话只允许写入库内普通文件路径：符号链接（含指向库外的悬空链接）一律拒绝";
+
+/** 整理会话路径参数含 .. 段的拒绝原因(词法折叠会掩盖符号链接的物理穿越)。 */
+export const REASON_ORGANIZER_PARENT_TRAVERSAL =
+  "知识库整理会话只允许 wiki/ 根相对的下行路径：路径参数不得包含 .. 段，请改为库内下行路径";
+
+/** 整理会话缺少登记可写根时的拒绝原因(宿主侧不变量失败:只陈述事实,模型无从整改)。 */
+export const REASON_ORGANIZER_ROOT_MISSING =
+  "knowledge-organize-root-missing：知识库整理会话缺少登记的可写根，无法判定路径边界，本次调用拒绝";
+
+/**
+ * 整理槽缺登记根的具名拒绝,在两层策略缝里先于任何根推导执行。
+ *
+ * 不这样做的话 `organizerWriteDenial`(write/edit)与 `toToolCall`(全部工具)都会经
+ * `sessionWorkspaceRoot` 抛 `knowledge-organize-root-missing` 穿过监听层;只在其中一处
+ * 窄捕获会把错误契约劈成两半。判据与 `sessionWorkspaceRoot` 的整理分支一致:只认本
+ * 会话的非空登记根。主链路不可达(执行器在 createAgent 前写根、dispose 后才清)。
+ */
+function organizerRootDenial(
+  ctx: Pick<Context, "huaanworkSessionRoots">,
+  execution: ToolExecution,
+): string | undefined {
+  const sessionId = sessionIdOfAgentRef(execution.agent) ?? "";
+  if (!isKbOrganizeSessionId(sessionId)) return undefined;
+  const root = ctx.huaanworkSessionRoots?.get(sessionId);
+  return root !== undefined && root.length > 0 ? undefined : REASON_ORGANIZER_ROOT_MISSING;
+}
+
+/** 整理槽 fs 工具要核对的路径参数键(与 `@huaanwork/policy` 的 `pathsAreInside` 同集合)。 */
+const FS_PATH_KEYS = ["path", "file", "file_path", "root"] as const;
+
+/**
+ * 整理槽 fs 路径参数的 .. 段拒绝(规格 §5.3 第 2 条)。
+ *
+ * 原始拼写含 .. 时,本文件与 decide 的词法折叠会把 `sub/../evil.md` 折成库内路径,
+ * 逐段 lstat 看不到中间符号链接;上游 fs-local 保留 .. 物理拼写并经 native realpath
+ * 物理穿越,可真实写/读库外(沙箱 workspace-write 的可写根含平台临时区)。整理提示词
+ * 只要求 wiki 根相对的下行路径,.. 段无合法用途,按原始拼写直接拒绝,两种分隔符都拦。
+ */
+function organizerParentTraversalDenial(execution: ToolExecution): string | undefined {
+  if (!isKbOrganizeSessionId(sessionIdOfAgentRef(execution.agent))) return undefined;
+  const args = objectArgs(execution.arguments);
+  for (const key of FS_PATH_KEYS) {
+    const candidate = args[key];
+    if (typeof candidate === "string" && candidate.split(/[\\/]/).includes("..")) {
+      return REASON_ORGANIZER_PARENT_TRAVERSAL;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 知识库整理槽的写目标附加检查(规格 §5.3 第 2 条):OS 临时目录与符号链接。
+ *
+ * 为什么不放进 `@huaanwork/policy`:`decide.ts` 保持纯判定、零平台依赖;临时目录
+ * 与 `lstat` 需要真实文件系统,放在宿主护栏层。
+ *
+ * 为什么必须有:`resolveInside` 已经拒绝目标仍存在的越界链接,但 `forWrite` 分支对
+ * 不存在的目标会退到父目录做 `realpath`,`wiki/` 内一条**悬空**符号链接因此能被解析
+ * 成"库内路径"而放行——写下去就等于在库外建文件。`lstat` 不跟随链接,能看见它;
+ * 也不能用 `stat`,悬空链接的 `stat` 同样是 ENOENT。
+ *
+ * 临时目录判定只覆盖"库根之外"的目标:便携安装或测试会把库根放在平台临时目录下,
+ * 库内写入仍由 `resolveInside(wikiRoot)` 收口。
+ */
+export function organizerWriteDenial(
+  ctx: Pick<Context, "huaanworkSessionRoots" | "huaanworkWorkspaceRoot">,
+  execution: ToolExecution,
+): string | undefined {
+  if (execution.name !== "write" && execution.name !== "edit") return undefined;
+  const sessionId = sessionIdOfAgentRef(execution.agent);
+  if (!isKbOrganizeSessionId(sessionId)) return undefined;
+  const root = sessionWorkspaceRoot(ctx, sessionId);
+  const rawTmp = tmpdir();
+  const realTmp = safeRealpath(rawTmp);
+  const normalizedRoot = safeRealpath(root) ?? normalizeTempAlias(resolve(root), rawTmp, realTmp);
+  const args = objectArgs(execution.arguments);
+  for (const key of FS_PATH_KEYS) {
+    const candidate = args[key];
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
+    const target = resolve(root, candidate);
+    const normalizedTarget = normalizeTempAlias(target, rawTmp, realTmp);
+    // macOS 下 tmpdir() 为 /var/folders/... 而 realpath 为 /private/var/folders/...:
+    // 两侧同时按规范别名比对,既拦截规范临时路径越界,也不误伤落入规范库根内的合法写入。
+    const inTemp = isInsidePath(rawTmp, target) || (realTmp !== undefined && isInsidePath(realTmp, normalizedTarget));
+    const inRoot = isInsidePath(root, target) || isInsidePath(normalizedRoot, normalizedTarget);
+    if (inTemp && !inRoot) return REASON_ORGANIZER_TEMP;
+    // 对库内目标自库根向下逐段 lstat:同时拦截叶悬空链接与中间悬空目录链接(resolveInside
+    // 的 existingParent 会越过悬空目录段退回 wiki/),不检查库根之上的系统祖先链接。
+    const symlinkHit = isInsidePath(root, target)
+      ? hasSymlinkSegment(root, target)
+      : isInsidePath(normalizedRoot, normalizedTarget)
+        ? hasSymlinkSegment(normalizedRoot, normalizedTarget)
+        : isSymlinkOrUnreadable(target);
+    if (symlinkHit) return REASON_ORGANIZER_SYMLINK;
+  }
+  return undefined;
+}
+
+function safeRealpath(target: string): string | undefined {
+  try {
+    return realpathSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeTempAlias(candidate: string, rawTmp: string, realTmp: string | undefined): string {
+  if (realTmp === undefined || !isInsidePath(rawTmp, candidate)) return candidate;
+  const rel = relative(resolve(rawTmp), resolve(candidate));
+  return rel === "" ? realTmp : resolve(realTmp, rel);
+}
+
+function isSymlinkOrUnreadable(target: string): boolean {
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(target);
+  } catch (error) {
+    // ENOENT 表示"链接本身不存在"的新文件:继续走 decide.ts 的路径判定。
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+    // 其余错误无法证明目标不是链接:fail closed。
+    return true;
+  }
+  return stats.isSymbolicLink();
+}
+
+function hasSymlinkSegment(root: string, target: string): boolean {
+  const absRoot = resolve(root);
+  const absTarget = resolve(target);
+  const rel = relative(absRoot, absTarget);
+  if (rel === "") return isSymlinkOrUnreadable(absRoot);
+  if (rel.startsWith("..") || isAbsolute(rel)) return isSymlinkOrUnreadable(absTarget);
+  let current = absRoot;
+  for (const segment of rel.split(sep)) {
+    if (segment.length === 0) continue;
+    current = join(current, segment);
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+      return true;
+    }
+    if (stats.isSymbolicLink()) return true;
+  }
+  return false;
+}
+
+function isInsidePath(root: string, candidate: string): boolean {
+  const rel = relative(resolve(root), resolve(candidate));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 /**
