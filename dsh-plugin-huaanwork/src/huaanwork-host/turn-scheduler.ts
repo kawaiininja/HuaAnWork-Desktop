@@ -27,19 +27,33 @@ export type QueueItem = {
 
 export type AdmitUserResult =
   | { kind: 'start'; root: string }
-  | { kind: 'queued'; root: string; queueItemId: string }
+  /**
+   * `drain` 只在“抢占成功且调用前用户队列非空”的新到项上出现:该用户已入队,
+   * `sessions.ts` 须在返回前调一次 `drainUserQueue`,把腾出的名额先给更早的等待者。
+   * 普通排队省略它,保持既有应答深相等形状。
+   */
+  | { kind: 'queued'; root: string; queueItemId: string; drain?: true }
   | { kind: 'error'; reason: string }
 
 export type AdmitAutomationResult = { kind: 'start'; root: string } | { kind: 'skip'; reason: 'root-busy' | 'cap-full' }
 
+/** 整理槽准入:全局最多一个 `kb-organize` 写者,用户队列非空时让位。 */
+export type AdmitKbOrganizeResult =
+  | { kind: 'start'; root: string }
+  | { kind: 'skip'; reason: 'root-busy' | 'cap-full' | 'kb-busy' | 'queue-non-empty' }
+
 type RootWriter = {
-  kind: 'user' | 'agent-automation' | 'script-automation'
+  kind: 'user' | 'agent-automation' | 'script-automation' | 'kb-organize'
   sessionId: string
   runId?: string
   /** 自动化写者的来源任务 id;用户写者没有。供删除前的活跃快照覆盖 admit→enqueue 窗口。 */
   automationId?: string
   /** 直接启动的 `at.kind === 'expert-team'` 团队回合;运行创建前由它识别团队意图。 */
   expertTeam?: boolean
+  /** 整理写者的知识库 id;全局单槽下只用于标识本次整理。 */
+  kbId?: string
+  /** 被用户回合抢占时调用:整理侧据此停止正在跑的组织回合。 */
+  onPreempt?: () => void
 }
 
 export type TurnScheduler = {
@@ -55,6 +69,17 @@ export type TurnScheduler = {
     /** 见 {@link QueueItem.at};`kind: 'expert-team'` 在排队期间不得丢失。 */
     at?: { name: string; clientMessageId?: string; kind?: 'expert-team' }
   }): AdmitUserResult
+  /**
+   * 整理回合准入:全局最多一个 `kb-organize` 写者,且它的可写根独占。
+   * 用户队列非空时直接让位,不插队;`cap-full` 只在其它条件都满足时报告。
+   */
+  admitKbOrganize(input: {
+    kbId: string
+    sessionId: string
+    root: string
+    /** 用户回合因全局名额满而抢占时调用,整理侧据此停止当前组织回合。 */
+    onPreempt: () => void
+  }): AdmitKbOrganizeResult
   admitAutomation(input: {
     automationId: string
     sessionId: string
@@ -114,33 +139,94 @@ export function createTurnScheduler(options: {
   const cancelledStarts = new Set<string>()
   /** 定时调度最近一次准入被跳过的自动化;成功准入或显式清除时移除。手动运行不写这里。 */
   const admissionSkips = new Set<string>()
-  /** 执行中的占名额回合数(用户回合 + 会调用模型的自动化)。 */
+  /** 执行中的占名额回合数(用户回合 + 会调用模型的自动化 + 整理回合)。 */
   let activeTurns = 0
+
+  /** 当前活跃的整理写者;全局单槽,不存在时返回 undefined。 */
+  function activeKbOrganize(): { root: string; writer: RootWriter } | undefined {
+    for (const [root, writer] of rootWriters) {
+      if (writer.kind === 'kb-organize') return { root, writer }
+    }
+    return undefined
+  }
+
+  /** 入队一条用户消息;`enqueuedAt` 取当前时刻,出队按它排先后。 */
+  function enqueueUser(input: {
+    sessionId: string
+    tabId: string
+    text: string
+    modelId: string
+    clientMessageId?: string
+    skill?: string
+    at?: { name: string; clientMessageId?: string; kind?: 'expert-team' }
+  }, root: string): QueueItem {
+    const item: QueueItem = {
+      queueItemId: createId(),
+      sessionId: input.sessionId,
+      tabId: input.tabId,
+      text: input.text,
+      root,
+      modelId: input.modelId,
+      enqueuedAt: now(),
+      ...(input.clientMessageId === undefined ? {} : { clientMessageId: input.clientMessageId }),
+      ...(input.skill === undefined ? {} : { skill: input.skill }),
+      ...(input.at === undefined ? {} : { at: input.at }),
+    }
+    queue.push(item)
+    return item
+  }
 
   return {
     admitUserTurn(input) {
       const root = resolvePath(input.root)
       if (!options.modelExists(input.modelId)) return { kind: 'error', reason: '模型不存在' }
-      if (rootWriters.has(root) || activeTurns >= options.maxConcurrentTurns()) {
-        const item: QueueItem = {
-          queueItemId: createId(),
-          sessionId: input.sessionId,
-          tabId: input.tabId,
-          text: input.text,
-          root,
-          modelId: input.modelId,
-          enqueuedAt: now(),
-          ...(input.clientMessageId === undefined ? {} : { clientMessageId: input.clientMessageId }),
-          ...(input.skill === undefined ? {} : { skill: input.skill }),
-          ...(input.at === undefined ? {} : { at: input.at }),
+      const hadQueuedItems = queue.length > 0
+      let preempted = false
+      // 只有“用户自己的根空闲、但全局名额满”才是被整理写者挡住的理由;同根忙碌只排队,
+      // 不无谓取消整理(规格 §8.2(3))。
+      if (!rootWriters.has(root) && activeTurns >= options.maxConcurrentTurns()) {
+        const organizer = activeKbOrganize()
+        if (organizer !== undefined) {
+          // 已接受的窗口:整理写者在这里移出 rootWriters,但旧 agent 的 dispose 还没完成;
+          // 随后 drainQueue 可以把与它同根的用户回合准入,不另加根锁(inFlightOrganizeByKb
+          // 只串行整理槽的 create/delete,不挡用户回合)。
+          organizer.writer.onPreempt?.()
+          rootWriters.delete(organizer.root)
+          activeTurns -= 1
+          preempted = true
         }
-        queue.push(item)
+      }
+      // FIFO(2026-11-26):抢占腾出的名额先给更早入队的用户;只有调用前队列为空时,
+      // 新用户才在本调用内直接开始。已出队项的启动与本次入队项的归属由 sessions.ts
+      // 调一次 drainUserQueue 决定。
+      if (preempted && hadQueuedItems) {
+        const item = enqueueUser(input, root)
+        return { kind: 'queued', root, queueItemId: item.queueItemId, drain: true }
+      }
+      if (rootWriters.has(root) || activeTurns >= options.maxConcurrentTurns()) {
+        const item = enqueueUser(input, root)
         return { kind: 'queued', root, queueItemId: item.queueItemId }
       }
       rootWriters.set(root, {
         kind: 'user',
         sessionId: input.sessionId,
         ...(input.at?.kind === 'expert-team' ? { expertTeam: true } : {}),
+      })
+      activeTurns += 1
+      return { kind: 'start', root }
+    },
+
+    admitKbOrganize(input) {
+      const root = resolvePath(input.root)
+      if (queue.length > 0) return { kind: 'skip', reason: 'queue-non-empty' }
+      if (rootWriters.has(root)) return { kind: 'skip', reason: 'root-busy' }
+      if (activeKbOrganize() !== undefined) return { kind: 'skip', reason: 'kb-busy' }
+      if (activeTurns >= options.maxConcurrentTurns()) return { kind: 'skip', reason: 'cap-full' }
+      rootWriters.set(root, {
+        kind: 'kb-organize',
+        sessionId: input.sessionId,
+        kbId: input.kbId,
+        onPreempt: input.onPreempt,
       })
       activeTurns += 1
       return { kind: 'start', root }
@@ -258,7 +344,8 @@ export function createTurnScheduler(options: {
 
     soleCapWriterSessionId() {
       const sessionIds = [...rootWriters.values()]
-        .filter((writer) => countsTowardCap(writer.kind))
+        // 整理写者占名额但不是“唯一能力写者”:它不能让能力槽被当成唯一用户回合。
+        .filter((writer) => countsTowardCap(writer.kind) && writer.kind !== 'kb-organize')
         .map((writer) => writer.sessionId)
       return sessionIds.length === 1 ? sessionIds[0] : undefined
     },

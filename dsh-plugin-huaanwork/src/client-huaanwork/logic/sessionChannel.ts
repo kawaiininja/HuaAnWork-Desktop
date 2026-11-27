@@ -287,14 +287,14 @@ export function hasBufferedQueueStartForSession(
  * 一次 `session.send` 应答后应重放的早到事件。
  *
  * - 真正开始执行的应答重放整份缓冲(顺序不变)；
- * - 排队应答只重放本次 `queueItemId` 的队列事件；仅当本次排队项的
+ * - 排队或已出队待 queue-start 的应答只重放本次 `queueItemId` 的队列事件；仅当本次排队项的
  *   `session/queue-start` 已在缓冲里(它真的开始执行)时，才保留携带本次
  *   `clientMessageId` 的早到工具（含 `todo_write` 与普通工具及其配对结束），
  *   并保留本次 `queue-start` 之后同会话的终态/goal 事件，按原执行顺序重放
  *   （`queue-start` 先于工具与终态，启动前的旧回合事件仍排除）；
  * - 未启动(含 `queue-fail`)的应答丢弃本次缓冲。
  *
- * @param sent `session.send` 应答(排队/启动/`queueItemId`)
+ * @param sent `session.send` 应答(排队/出队/启动/`queueItemId`)
  * @param buffered 本次发送应答回来之前暂存的事件(按到达顺序)
  * @param pendingClientMessageId 本次发送的持久回合锚
  * @param isQueueControl 只匹配本次排队项的队列事件(start/fail)，由调用点按 `queueItemId` 闭包
@@ -307,7 +307,7 @@ export function takeEarlyPendingEvents(
   isQueueControl: (event: RpcEvent) => boolean,
 ): RpcEvent[] {
   if (sendOpensTurn(sent)) return [...buffered];
-  if (!(sent.waiting && sent.queueItemId !== undefined)) return [];
+  if (sent.queueItemId === undefined) return [];
   const queueEvents = buffered.filter(isQueueControl);
   const startIndex = buffered.findIndex((event) => isQueueControl(event) && event.event === "session/queue-start");
   // 本次排队项没有真正开始(只有 queue-fail 或什么都没到)：没有回合可以挂待办、工具或终态。

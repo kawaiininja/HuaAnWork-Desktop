@@ -2192,9 +2192,10 @@ test("early queue start is buffered until the queued response", () => {
   assert.ok(firstPushAt > knownAt, "an unknown queue item is buffered only after that check");
   assert.match(holdSource, /pendingSendOfTab\(incoming\.tabId\)/, "queue events are buffered per tab");
 
-  // 排队应答只重放与本条 queueItemId 一致的队列事件，其他未知 id 不得套用。
+  // 排队/已出队待 queue-start 的应答只重放与本条 queueItemId 一致的队列事件，其他未知 id 不得套用。
   const takeBody = functionBody("function takePendingBuffer(", "function dropPending(");
-  assert.match(takeBody, /sent\.waiting && sent\.queueItemId !== undefined/);
+  assert.match(takeBody, /if \(sent\.queueItemId !== undefined\) \{/);
+  assert.doesNotMatch(takeBody, /sent\.waiting && sent\.queueItemId/);
   assert.match(takeBody, /event\.queueItemId === queueItemId/);
   assert.match(takeBody, /\(event\.event === "session\/queue-start" \|\| event\.event === "session\/queue-fail"\)/);
 
@@ -2316,11 +2317,11 @@ test("pending send does not buffer the previous turn events", () => {
   assert.ok(runningGuardAt >= 0, "a running turn on the same session keeps its events out of the buffer");
   assert.ok(lastPushAt > runningGuardAt, "the running-turn guard runs before the goal events are buffered");
 
-  // B 的 waiting 应答不撤销 A 的停止闩锁或终态。
+  // B 的排队/出队应答不撤销 A 的停止闩锁或终态。
   const body = functionBody("async function send(", "async function stopTurn(");
-  const waitingBranch = blockAfter(body, "if (sent.waiting && sent.queueItemId !== undefined) {").body;
+  const ownerBranch = blockAfter(body, "if (sent.queueItemId !== undefined) {").body;
   for (const needle of ["patchTabTurn(", "stopSessionId", "latchOwner", "stopping", "writeTabRun("]) {
-    assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
+    assert.ok(!ownerBranch.includes(needle), `the queue owner branch must not touch ${needle}`);
   }
   const a = { running: true, waitingIds: [] as string[] };
   assert.deepEqual(noteSendResult(a, { waiting: true, started: false, queueItemId: "qb" }), {
@@ -2342,7 +2343,7 @@ test("a cross-tab running turn's session end is never buffered into another tab'
 
   // 最终评审 Important 1:标签 A 正在执行会话 S,标签 B 也绑定 S 并发送(同根排队)。
   // B 的应答未回时 A 的 session/end 到达:它属于 A 的执行中回合,必须照常即时结算。
-  // 若被放进 B 的 pending 缓冲,B 的 waiting 应答只重放匹配 queueItemId 的队列事件,
+  // 若被放进 B 的 pending 缓冲,B 的排队/出队应答只重放匹配 queueItemId 的队列事件,
   // A 的结束会被丢弃,A 永久 running。
   const crossTabLookupAt = holdSource.indexOf("const turnTab = turnTabForSession(sessionId);");
   assert.ok(crossTabLookupAt > sameTabGuardAt, "an any-tab turn lookup runs after the same-tab guard");
@@ -2353,7 +2354,7 @@ test("a cross-tab running turn's session end is never buffered into another tab'
   const lastPushAt = holdSource.lastIndexOf("pending.buffered.push(incoming);");
   assert.ok(lastPushAt > crossTabGuardAt, "goal events are buffered only after the any-tab running guard");
 
-  // 行为钉:A 的结束即时结算(执行态落下),B 的 waiting 应答只写 B 自己的等待位,
+  // 行为钉:A 的结束即时结算(执行态落下),B 的排队/出队应答只写 B 自己的等待位,
   // 不触碰 A 的停止闩锁与 epoch(生产 reducer 实测,非 helper 布尔)。
   const settled = noteTurnEnded({ running: true, waitingIds: [] });
   assert.deepEqual(settled, { running: false, waitingIds: [] }, "A's end settles A's run state immediately");
@@ -2366,9 +2367,9 @@ test("a cross-tab running turn's session end is never buffered into another tab'
   const armed = finishStop({ ticket, pending: ticket, currentEpoch: 1, ok: true, latchOwner: null });
   assert.equal(armed.arm, true, "B's queued send on the shared session leaves A's stop ticket armed");
   const body = functionBody("async function send(", "async function stopTurn(");
-  const waitingBranch = blockAfter(body, "if (sent.waiting && sent.queueItemId !== undefined) {").body;
+  const ownerBranch = blockAfter(body, "if (sent.queueItemId !== undefined) {").body;
   for (const needle of ["openTurnForTab(", "patchTabTurn(", "writeTabRun("]) {
-    assert.ok(!waitingBranch.includes(needle), `the waiting branch must not touch ${needle}`);
+    assert.ok(!ownerBranch.includes(needle), `the queue owner branch must not touch ${needle}`);
   }
 });
 
@@ -2390,7 +2391,7 @@ test("a stopped session's idle end never enters the next send's buffer", () => {
   const takeBody = functionBody("function takePendingBuffer(", "function dropPending(");
   const replayAt = takeBody.indexOf("if (sendOpensTurn(sent)) return buffered;");
   const discardAt = takeBody.indexOf("discardBufferedStopEnds(buffered);");
-  const filterAt = takeBody.indexOf("if (sent.waiting && sent.queueItemId !== undefined) {");
+  const filterAt = takeBody.indexOf("if (sent.queueItemId !== undefined) {");
   const emptyAt = takeBody.indexOf("return [];");
   assert.ok(replayAt >= 0, "a started response still replays the buffer as-is");
   assert.ok(discardAt > replayAt, "only buffers this send will not replay need the fallback");
@@ -3484,4 +3485,203 @@ test("sidebar navigation routes through the expert-team dirty guard", () => {
   // 状态来源：专家团页把编辑器脏状态上报给 App。
   assert.match(APP_SOURCE, /const \[expertTeamDraftDirty, setExpertTeamDraftDirty\] = useState\(false\);/);
   assert.match(APP_SOURCE, /<ExpertTeamsView refreshSignal=\{expertTeamChangeSignal\} onDirtyChange=\{setExpertTeamDraftDirty\} \/>/);
+});
+
+/**
+ * R3-1:出队应答 `{waiting:false, started:false, queueItemId}` 的四种时序。
+ * App 的两处条件(queue owner 登记与 `takePendingBuffer` 过滤)由源码钉保证真实接线,
+ * 时序本身由生产 helper(`noteSendResult`、`takeEarlyPendingEvents`、
+ * `queuedTurnRunState`、`releaseWaitingItem`、`restoreQueuedModelPick`)驱动的最小
+ * 接线复现:应答登记 owner 后 queue-start/queue-fail 才找得到原用户消息。
+ */
+function queueTimingHarness() {
+  const tabId = "work-2";
+  const userId = 2;
+  const queueItemId = "qb";
+  type TimingItem = { id: number; kind: "user"; text: string; queueItemId?: string; notStarted?: boolean };
+  type TimingTab = { id: string; items: TimingItem[] };
+  const tabs: TimingTab[] = [{
+    id: tabId,
+    items: [
+      { id: 1, kind: "user", text: "上一回合" },
+      { id: userId, kind: "user", text: "B", notStarted: true },
+    ],
+  }];
+  const owners = new Map<string, AppModule.QueuedModelOwner>();
+  const pending = { tabId, clientMessageId: "uuid-b", buffered: [] as RpcEvent[] };
+  let run: { running: boolean; waitingIds: string[] } = { running: false, waitingIds: [] };
+  // 发送时本标签已记下 m2;owner 里的 previousModelPick 才是回滚基准。
+  let picks: Record<string, string> = { [tabId]: "m2" };
+  let opens = 0;
+  const failedReasons: string[] = [];
+
+  const itemOf = (): TimingItem => tabs[0]!.items.find((item) => item.id === userId)!;
+  const clearQueueItem = (id: string, outcome: "started" | "unstarted" = "started"): number | undefined => {
+    const owner = owners.get(id);
+    const scan = tabs[0]!.items.find((item) => item.queueItemId === id);
+    const ownerId = owner?.userId ?? scan?.id;
+    owners.delete(id);
+    if (ownerId === undefined) return undefined;
+    tabs[0]!.items = tabs[0]!.items.map((item) => item.queueItemId === id
+      ? (outcome === "started" ? AppModule.startUserItem(item) : releaseWaitingItem(item, false))
+      : item);
+    return ownerId;
+  };
+
+  const beginQueuedTurn = (id: string): void => {
+    const ownerId = clearQueueItem(id);
+    run = AppModule.queuedTurnRunState(run, id, ownerId !== undefined);
+    if (ownerId !== undefined) opens += 1;
+  };
+
+  const failQueuedTurn = (id: string, reason: string): void => {
+    run = noteWaitingFailed(run, id);
+    if (owners.has(id)) {
+      // 与 App 的 rollbackQueuedModelPick 同序:先按快照还原 picks,再把基准交接给
+      // 仍然排队的下一条(交接必须发生在 clearQueueItem 删除 owner 之前)。
+      const snapshot = new Map(Array.from(owners, ([key, entry]) => [key, { ...entry }]));
+      AppModule.restoreQueuedModelPick({}, owners, id);
+      picks = AppModule.restoreQueuedModelPick(picks, snapshot, id);
+    }
+    clearQueueItem(id, "unstarted");
+    failedReasons.push(reason);
+  };
+
+  const applyEvent = (event: RpcEvent): void => {
+    if (event.event === "session/queue-start") {
+      beginQueuedTurn(event.queueItemId);
+      return;
+    }
+    if (event.event === "session/queue-fail") {
+      failQueuedTurn(event.queueItemId, event.reason);
+    }
+  };
+
+  /** 应答回来前 queue-start/fail 暂存;owner 已登记则即时处理(与 App 的闸门同序)。 */
+  const deliver = (event: RpcEvent): void => {
+    const control = event.event === "session/queue-start" || event.event === "session/queue-fail";
+    if (control && owners.has(event.queueItemId)) {
+      applyEvent(event);
+      return;
+    }
+    pending.buffered.push(event);
+  };
+
+  const respond = (sent: { waiting: boolean; started: boolean; queueItemId?: string; sessionId?: string }): void => {
+    run = noteSendResult(run, sent);
+    if (sent.queueItemId !== undefined) {
+      const id = sent.queueItemId;
+      owners.set(id, { tabId, userId, modelId: "m2", previousModelPick: "m1" });
+      tabs[0]!.items = tabs[0]!.items.map((item) => (item.id === userId ? { ...item, queueItemId: id } : item));
+    } else if (!sent.started) {
+      picks = AppModule.restoreModelPick(picks, tabId, "m2", "m1");
+      tabs[0]!.items = tabs[0]!.items.map((item) => (item.id === userId ? { ...item, notStarted: true } : item));
+    }
+    if (sendOpensTurn(sent)) opens += 1;
+    const buffered = pending.buffered;
+    pending.buffered = [];
+    const qid = sent.queueItemId;
+    const replayed = sendOpensTurn(sent)
+      ? buffered
+      : qid !== undefined
+        ? takeEarlyPendingEvents(sent, buffered, pending.clientMessageId, (event) => (
+            (event.event === "session/queue-start" || event.event === "session/queue-fail")
+            && event.queueItemId === qid
+          ))
+        : [];
+    for (const event of replayed) applyEvent(event);
+  };
+
+  return {
+    tabId,
+    userId,
+    queueItemId,
+    owners,
+    pending,
+    respond,
+    deliver,
+    itemOf,
+    state: () => run,
+    picks: () => picks,
+    opens: () => opens,
+    failedReasons,
+  };
+}
+
+test("R3-1: a queue start before its dequeued response replays through the owner exactly once", () => {
+  const body = functionBody("async function send(", "async function stopTurn(");
+  const sendAt = body.indexOf('await rpcCall<SessionSendResult>("session.send"');
+  assert.ok(sendAt >= 0, "send still awaits the session.send response");
+  const ownerAt = body.indexOf("if (sent.queueItemId !== undefined) {", sendAt);
+  assert.ok(ownerAt > sendAt, "the queue owner registration accepts a dequeued response");
+  assert.ok(
+    blockAfter(body.slice(ownerAt), "if (sent.queueItemId !== undefined) {").body.includes("queueOwnersRef.current.set"),
+    "the owner record is written for every queueItemId, waiting or already dequeued",
+  );
+  assert.doesNotMatch(body, /sent\.waiting && sent\.queueItemId !== undefined/);
+
+  const h = queueTimingHarness();
+  const queueStart: RpcEvent = { event: "session/queue-start", sessionId: "s", tabId: h.tabId, queueItemId: h.queueItemId };
+  h.deliver(queueStart);
+  assert.equal(h.pending.buffered.length, 1, "the early start is buffered before the response");
+  assert.equal(h.opens(), 0);
+
+  h.respond({ waiting: false, started: false, queueItemId: h.queueItemId, sessionId: "s" });
+  assert.equal(h.opens(), 1, "replay opens the turn exactly once");
+  assert.deepEqual(h.state(), { running: true, waitingIds: [] });
+  assert.deepEqual(h.pending.buffered, []);
+  assert.equal(h.itemOf().queueItemId, undefined);
+  assert.equal(h.itemOf().notStarted, undefined);
+});
+
+test("R3-1: a queue start after its dequeued response is handled by the recorded owner exactly once", () => {
+  const h = queueTimingHarness();
+  h.respond({ waiting: false, started: false, queueItemId: h.queueItemId, sessionId: "s" });
+  assert.equal(h.owners.has(h.queueItemId), true, "the dequeued response records its owner");
+  assert.equal(h.opens(), 0);
+
+  h.deliver({ event: "session/queue-start", sessionId: "s", tabId: h.tabId, queueItemId: h.queueItemId });
+  assert.equal(h.opens(), 1);
+  assert.deepEqual(h.state(), { running: true, waitingIds: [] });
+  assert.deepEqual(h.pending.buffered, [], "a known queue item is never buffered");
+});
+
+test("R3-1: a queue fail before its dequeued response never opens a turn and rolls the pick back", () => {
+  const h = queueTimingHarness();
+  h.deliver({ event: "session/queue-fail", sessionId: "s", tabId: h.tabId, queueItemId: h.queueItemId, reason: "busy" });
+  h.respond({ waiting: false, started: false, queueItemId: h.queueItemId, sessionId: "s" });
+
+  assert.equal(h.opens(), 0, "a failed queue item has no turn to initialize");
+  assert.deepEqual(h.state(), { running: false, waitingIds: [] });
+  assert.equal(h.itemOf().queueItemId, undefined);
+  assert.equal(h.itemOf().notStarted, true, "the owner exists, so the failed message is marked notStarted");
+  assert.deepEqual(h.picks(), { [h.tabId]: "m1" }, "the owner's pre-send pick is restored");
+  assert.deepEqual(h.failedReasons, ["busy"], "the failure reason stays visible");
+});
+
+test("R3-1: a queue fail after its dequeued response rolls back, and ordinary responses still pass", () => {
+  const h = queueTimingHarness();
+  h.respond({ waiting: false, started: false, queueItemId: h.queueItemId, sessionId: "s" });
+  h.deliver({ event: "session/queue-fail", sessionId: "s", tabId: h.tabId, queueItemId: h.queueItemId, reason: "dequeued-fail" });
+
+  assert.equal(h.opens(), 0);
+  assert.deepEqual(h.state(), { running: false, waitingIds: [] });
+  assert.equal(h.itemOf().notStarted, true);
+  assert.deepEqual(h.picks(), { [h.tabId]: "m1" });
+  assert.deepEqual(h.failedReasons, ["dequeued-fail"]);
+
+  // 既有的直接开始与 waiting 应答形状不变。
+  const direct = queueTimingHarness();
+  direct.respond({ waiting: false, started: true, sessionId: "s" });
+  assert.equal(direct.opens(), 1);
+  assert.deepEqual(direct.state(), { running: true, waitingIds: [] });
+  assert.deepEqual(direct.picks(), { [direct.tabId]: "m2" }, "a started send keeps its pick");
+
+  const waiting = queueTimingHarness();
+  waiting.respond({ waiting: true, started: false, queueItemId: "q-other" });
+  assert.deepEqual(waiting.state(), { running: false, waitingIds: ["q-other"] });
+  assert.equal(waiting.opens(), 0, "a waiting response never opens a turn");
+  waiting.deliver({ event: "session/queue-start", sessionId: "s", tabId: waiting.tabId, queueItemId: "q-other" });
+  assert.equal(waiting.opens(), 1);
+  assert.deepEqual(waiting.state(), { running: true, waitingIds: [] });
 });

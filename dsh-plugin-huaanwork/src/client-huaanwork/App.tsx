@@ -453,7 +453,10 @@ const IDLE_TAB_TURN: TabTurn = {
 /** 没有回合记录的标签按空闲处理；`waitingIds` 只在事件闭包里由发送应答追加。 */
 const IDLE_TAB_RUN: TabRunState = { running: false, waitingIds: [] };
 
-/** `session.send` 的应答：排队只占位，`started: true` 才真正开始执行。 */
+/**
+ * `session.send` 的应答：排队只占位，`started: true` 才真正开始执行。
+ * `queueItemId` 覆盖等待中与已出队待 queue-start 两种应答。
+ */
 type SessionSendResult = {
   queued?: boolean;
   waiting: boolean;
@@ -1054,7 +1057,7 @@ export default function App() {
 
   /**
    * 取出本次发送暂存的早到事件并清掉它的 pending：直接开始的回合按原顺序全部重放；
-   * 排队应答只重放 `queueItemId` 与它一致的那几条（本次排队项真的开始执行时，
+   * 排队/已出队应答只重放 `queueItemId` 与它一致的那几条（本次排队项真的开始执行时，
    * 连带重放携带本次锚点的早到 `todo_write`，队列开始先于待办）；
    * 没启动的应答只丢弃本次缓冲。清理只针对本次记录，别的发送的 pending 不受影响。
    */
@@ -1065,7 +1068,7 @@ export default function App() {
     if (sendOpensTurn(sent)) return buffered;
     // 这次发送不重放缓冲：被丢掉的结束不能带走过期标记，先按当前轮次消化它们。
     discardBufferedStopEnds(buffered);
-    if (sent.waiting && sent.queueItemId !== undefined) {
+    if (sent.queueItemId !== undefined) {
       const queueItemId = sent.queueItemId;
       return takeEarlyPendingEvents(sent, buffered, pending.clientMessageId, (event) => (
         (event.event === "session/queue-start" || event.event === "session/queue-fail")
@@ -3762,8 +3765,10 @@ export default function App() {
         // 让还没有本地选择的视图（模型 chip、任务列表）读到新的 task.modelId。本标签的发送选择已在
         // 上方记录，下一次发送按它解析，而不是按 task.modelId。
         if (sent.started === true || sent.waiting === true) void refreshTasks();
-        if (sent.waiting && sent.queueItemId !== undefined) {
+        if (sent.queueItemId !== undefined) {
           // 等待文案挂在已经插入的同一条用户消息上，不是标签级另一份列表。
+          // 已出队待 queue-start 的应答同样登记 owner：queue-start/queue-fail 据此找到原消息，
+          // 失败时才能回滚模型选择并标成未启动。
           const queueItemId = sent.queueItemId;
           // 归属记录带上本次送出的模型与发送前的选择：排队项没开始（失败/取消）时按它回滚。
           queueOwnersRef.current.set(queueItemId, {
