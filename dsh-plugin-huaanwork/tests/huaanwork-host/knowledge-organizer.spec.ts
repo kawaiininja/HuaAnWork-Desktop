@@ -24,7 +24,10 @@ import {
   type KnowledgeHost as RealKnowledgeHost,
 } from '../../src/huaanwork-host/knowledge/host.ts'
 import type { KnowledgeHost } from '../../src/huaanwork-host/knowledge/host.ts'
-import { noteKnowledgeOrganizerError } from '../../src/huaanwork-host/knowledge/organizer-activity.ts'
+import {
+  noteKnowledgeOrganizerActivity,
+  noteKnowledgeOrganizerError,
+} from '../../src/huaanwork-host/knowledge/organizer-activity.ts'
 import { KB_ORG_ALLOWED_TOOLS, KB_ORG_TOOLS } from '../../src/huaanwork-host/knowledge/org-tools.ts'
 import { kbOrganizeSessionId } from '../../src/huaanwork-host/knowledge/session-ids.ts'
 import { KnowledgeSyncError } from '../../src/huaanwork-host/knowledge/sync-engine.ts'
@@ -37,6 +40,7 @@ import type {
 import { setKnowledgeHost } from '../../src/huaanwork-host/knowledge/host-ref.ts'
 import { registerKnowledgeOrgTools } from '../../src/huaanwork-host/knowledge/org-tools.ts'
 import { ROUTE_TABLE } from '../../src/huaanwork-host/routes.ts'
+import { DEFAULT_AUTOMATION_TIMEOUT_MS } from '../../src/huaanwork-host/settings.ts'
 import { emptyAttachments, type AttachmentMaps } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import { createTurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
 import type { TurnScheduler } from '../../src/huaanwork-host/turn-scheduler.ts'
@@ -441,6 +445,8 @@ interface Harness {
   readonly deps: KnowledgeOrganizerDeps
   readonly createAgent: ReturnType<typeof vi.fn>
   readonly releaseSlot: ReturnType<typeof vi.fn>
+  /** 看门狗超时值读取 spy:断言创建时读一次、不逐心跳重读,并可注入读取异常。 */
+  readonly timeoutMs: ReturnType<typeof vi.fn>
   readonly agents: AgentHarness[]
   readonly promptContexts: Array<Record<string, unknown>>
   readonly queueStarted: string[]
@@ -601,6 +607,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
   const sessionToolAllow = new Map<string, readonly string[]>()
   const sessionModels = new Map<string, string>()
   const attachments = emptyAttachments()
+  const timeoutMs = vi.fn((): number => options.timeoutMs ?? 600_000)
   const deps: KnowledgeOrganizerDeps = {
     profileDir,
     dshHome,
@@ -613,7 +620,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
     createAgent: createAgent as unknown as (options: CreateAgentOptions) => Promise<AgentHandle>,
     releaseSlot,
     now: () => clock.now,
-    timeoutMs: () => options.timeoutMs ?? 600_000,
+    timeoutMs,
   }
   const organizer = createKnowledgeOrganizer(deps)
   organizerRef = organizer
@@ -629,6 +636,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
     deps,
     createAgent,
     releaseSlot,
+    timeoutMs,
     agents,
     promptContexts,
     queueStarted,
@@ -1227,6 +1235,69 @@ describe('sleep clock jump watchdog exemption', () => {
     })
     expect(harness.host.failureCalls).toHaveLength(1)
     expect(harness.host.failureCalls[0]?.error).toBe('knowledge-organize-idle-timeout')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 5.1 看门狗超时值来源（评审 I-1）
+// ---------------------------------------------------------------------------
+
+describe('watchdog timeout source', () => {
+  it('reads the idle timeout once per watchdog and reuses it for every heartbeat and wake', async () => {
+    vi.useFakeTimers()
+    const harness = createHarness({ timeoutMs: 600_000 })
+    harness.host.setDocs('kb1', [{ docId: 'd1' }])
+    harness.host.markOrganized('kb1', 'd1')
+
+    const run = harness.organizer.triggerManual('kb1')
+    await waitForFollowup(harness)
+    expect(harness.timeoutMs).toHaveBeenCalledTimes(1)
+
+    // 逐 token 心跳、休眠恢复与唤醒后的重新武装都复用创建时的快照，不逐次同步重读设置。
+    for (let beat = 0; beat < 5; beat += 1) {
+      noteKnowledgeOrganizerActivity(kbOrganizeSessionId('kb1'), 'token')
+    }
+    harness.organizer.noteSystemResume()
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(harness.timeoutMs).toHaveBeenCalledTimes(1)
+
+    resolveIdle(harness)
+    await run
+    expect((await eventsFor(harness)).map(event => event.kind)).toEqual(['organize_started', 'organize_completed'])
+  })
+
+  it('falls back to the default idle timeout when reading it throws, without breaking the batch', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const harness = createHarness()
+      harness.host.setDocs('kb1', [{ docId: 'd1' }])
+      harness.timeoutMs.mockImplementation(() => {
+        throw Object.assign(new Error("EACCES: permission denied, open 'huaanwork-settings.json'"), { code: 'EACCES' })
+      })
+
+      const run = harness.organizer.triggerManual('kb1')
+      await waitForFollowup(harness)
+
+      // 心跳与休眠恢复都不得把设置读取异常带进模型流 / 工具回调。
+      expect(() => noteKnowledgeOrganizerActivity(kbOrganizeSessionId('kb1'), 'token')).not.toThrow()
+      expect(() => harness.organizer.noteSystemResume()).not.toThrow()
+      // 回落默认 10 分钟：不足默认时长不超时，到点才由唤醒路径超时并计次（唤醒回调不抛）。
+      await advanceClock(harness, DEFAULT_AUTOMATION_TIMEOUT_MS - 1)
+      expect(harness.agents[0]?.cancel).not.toHaveBeenCalled()
+      await advanceClock(harness, 1)
+      await run
+
+      expect(harness.agents[0]?.cancel).toHaveBeenCalledWith({
+        kind: 'hook',
+        reason: 'knowledge-organize-idle-timeout',
+      })
+      expect(harness.host.failureCalls).toHaveLength(1)
+      expect(harness.host.failureCalls[0]?.error).toBe('knowledge-organize-idle-timeout')
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

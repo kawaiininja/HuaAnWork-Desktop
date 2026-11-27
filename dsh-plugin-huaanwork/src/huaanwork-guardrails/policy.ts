@@ -143,6 +143,8 @@ export function apply(ctx: Context): void {
     // 为无人值守,也不依赖 present-as 是否已经把工具从模型面收窄掉。
     const sessionDenial = sessionToolAllowDenial(ctx, execution);
     if (sessionDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${sessionDenial}` };
+    const rootDenial = organizerRootDenial(ctx, execution);
+    if (rootDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${rootDenial}` };
     const organizerDenial = organizerWriteDenial(ctx, execution);
     if (organizerDenial !== undefined) return { kind: "deny", reason: `huaanwork-policy: ${organizerDenial}` };
     const mode = readGuardMode(ctx.huaanworkProfileDir);
@@ -169,6 +171,8 @@ export function apply(ctx: Context): void {
     // 与 pre-execute 同一层判定:pre-execute 被 boot-overlay 剥离时,guard 仍独立拒绝。
     const sessionDenial = sessionToolAllowDenial(ctx, execution);
     if (sessionDenial !== undefined) return `huaanwork-guard: ${sessionDenial}`;
+    const rootDenial = organizerRootDenial(ctx, execution);
+    if (rootDenial !== undefined) return `huaanwork-guard: ${rootDenial}`;
     const organizerDenial = organizerWriteDenial(ctx, execution);
     if (organizerDenial !== undefined) return `huaanwork-guard: ${organizerDenial}`;
     const mode = readGuardMode(ctx.huaanworkProfileDir);
@@ -206,6 +210,28 @@ export const REASON_ORGANIZER_TEMP =
 /** 整理会话向符号链接(含指向库外的悬空链接)写入的拒绝原因。 */
 export const REASON_ORGANIZER_SYMLINK =
   "知识库整理会话只允许写入库内普通文件路径：符号链接（含指向库外的悬空链接）一律拒绝";
+
+/** 整理会话缺少登记可写根时的拒绝原因(宿主侧不变量失败:只陈述事实,模型无从整改)。 */
+export const REASON_ORGANIZER_ROOT_MISSING =
+  "knowledge-organize-root-missing：知识库整理会话缺少登记的可写根，无法判定路径边界，本次调用拒绝";
+
+/**
+ * 整理槽缺登记根的具名拒绝,在两层策略缝里先于任何根推导执行。
+ *
+ * 不这样做的话 `organizerWriteDenial`(write/edit)与 `toToolCall`(全部工具)都会经
+ * `sessionWorkspaceRoot` 抛 `knowledge-organize-root-missing` 穿过监听层;只在其中一处
+ * 窄捕获会把错误契约劈成两半。判据与 `sessionWorkspaceRoot` 的整理分支一致:只认本
+ * 会话的非空登记根。主链路不可达(执行器在 createAgent 前写根、dispose 后才清)。
+ */
+function organizerRootDenial(
+  ctx: Pick<Context, "huaanworkSessionRoots">,
+  execution: ToolExecution,
+): string | undefined {
+  const sessionId = sessionIdOfAgentRef(execution.agent) ?? "";
+  if (!isKbOrganizeSessionId(sessionId)) return undefined;
+  const root = ctx.huaanworkSessionRoots?.get(sessionId);
+  return root !== undefined && root.length > 0 ? undefined : REASON_ORGANIZER_ROOT_MISSING;
+}
 
 /** 写工具落盘前要核对的路径参数键(与 `@huaanwork/policy` 的 `pathsAreInside` 同集合)。 */
 const WRITE_PATH_KEYS = ["path", "file", "file_path", "root"] as const;

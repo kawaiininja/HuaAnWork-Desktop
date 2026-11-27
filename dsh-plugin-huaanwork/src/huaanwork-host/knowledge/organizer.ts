@@ -57,7 +57,8 @@ const KB_ORG_FOLLOWUP_TEXT =
 
 /**
  * 整理执行器依赖。`createAgent` 由 Host 注入真实 Agent 工厂；`releaseSlot` 是唯一
- * 名额释放器（Task 6 注入 `releaseAndDrain`）；`now`/`timeoutMs` 供看门狗与退避使用。
+ * 名额释放器（Task 6 注入 `releaseAndDrain`）；`now`/`timeoutMs` 供看门狗与退避使用，
+ * 其中 `timeoutMs` 只在每个看门狗创建时读取一次（读取异常回落默认超时）。
  */
 export interface KnowledgeOrganizerDeps {
   readonly profileDir: string
@@ -148,6 +149,25 @@ function sanitizeTerminalError(value: unknown): string {
   return folded.length > TERMINAL_ERROR_MAX_CHARS
     ? `${folded.slice(0, TERMINAL_ERROR_MAX_CHARS)}…`
     : folded
+}
+
+/**
+ * 看门狗超时值：每个 deadline 创建时只读一次并钳制，touch / re-arm 复用这份快照。
+ * 与自动化 `activityDeadline` 同一快照语义（设置修改从下一批生效），逐 token 心跳
+ * 不再同步重读设置；读取异常回落默认值并只告警一次，绝不逃出模型流、工具回调或
+ * 定时器回调（Host 进程的未捕获异常是 fail-loud exit(1)）。
+ */
+function readIdleTimeoutMs(read: () => number): number {
+  let raw: number
+  try {
+    raw = read()
+  } catch (error) {
+    console.warn(
+      `[knowledge] organize idle timeout read failed; using default ${String(DEFAULT_AUTOMATION_TIMEOUT_MS)}ms: ${String(error)}`,
+    )
+    return DEFAULT_AUTOMATION_TIMEOUT_MS
+  }
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_AUTOMATION_TIMEOUT_MS
 }
 
 function isEmptyBatch(batch: PendingOrganizeBatch): boolean {
@@ -266,10 +286,7 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
     // 超时可能早于 whenIdle 的 Promise.race 挂接（create/事件写入窗口）；先消费拒绝，
     // 保证此后 race 仍能读到同一个 timeout 原因，且不会触发进程级未处理拒绝。
     void promise.catch(() => undefined)
-    const timeout = (): number => {
-      const raw = deps.timeoutMs()
-      return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : DEFAULT_AUTOMATION_TIMEOUT_MS
-    }
+    const timeoutMs = readIdleTimeoutMs(deps.timeoutMs)
     const arm = (delayMs: number): void => {
       if (expired || stopped) return
       if (timer !== undefined) clearTimeout(timer)
@@ -280,19 +297,19 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
       timer = undefined
       if (expired || stopped) return
       const elapsed = deps.now() - baseline
-      if (elapsed >= timeout()) {
+      if (elapsed >= timeoutMs) {
         expired = true
         rejectDeadline(new KnowledgeOrganizeIdleTimeoutError())
         return
       }
-      arm(timeout() - elapsed)
+      arm(timeoutMs - elapsed)
     }
     const touch = (): void => {
       if (expired || stopped) return
       baseline = deps.now()
-      arm(timeout())
+      arm(timeoutMs)
     }
-    arm(timeout())
+    arm(timeoutMs)
     return {
       promise,
       touch,

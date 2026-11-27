@@ -477,6 +477,29 @@ test("organizer sessions cannot write through a dangling symlink that points out
   }
 });
 
+test("an organizer session without a registered root gets a named denial in both policy seams", async () => {
+  const { wiki } = createKnowledgeRoot();
+  const harness = createPolicyHarness({ sessionId: SESSION_ID, workspaceRoot: wiki });
+  // 整理会话根表缺条目在主链路不可达(执行器在 createAgent 前写根、dispose 后才清);这里只钉
+  // 异常路径的错误契约:所有白名单工具都是结构化拒绝,而不是让 `sessionWorkspaceRoot`
+  // 的缺根异常穿过 tools/pre-execute 与 guard。
+  (harness.ctx.huaanworkSessionRoots as Map<string, string>).delete(SESSION_ID);
+
+  for (const mode of MODES) {
+    harness.setMode(mode);
+    for (const name of ["write", "edit", "read", ...KB_ORG_TOOLS]) {
+      const result = await harness.preExecute(name, { path: "docs/d1.md" });
+      assert.equal(result.kind, "deny", `${name} ${mode} pre-execute`);
+      assert.match(String(result.reason ?? ""), /knowledge-organize-root-missing/, `${name} ${mode} pre-execute reason`);
+      assert.match(
+        String(harness.guard(name, { path: "docs/d1.md" }) ?? ""),
+        /knowledge-organize-root-missing/,
+        `${name} ${mode} guard`,
+      );
+    }
+  }
+});
+
 // ── policy 直接判定:三个整理工具永不返回 ask ───────────────────────────────
 
 test("kb_org_* decide branches never ask, attached or not", () => {
