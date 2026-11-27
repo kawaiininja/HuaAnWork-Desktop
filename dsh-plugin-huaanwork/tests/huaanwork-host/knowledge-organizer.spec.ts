@@ -588,9 +588,13 @@ function createHarness(options: HarnessOptions = {}): Harness {
     return harness.handle
   })
 
+  // 与生产 `releaseAndDrain → drainUserQueue → reevaluateKbOrganize` 同形：释放名额后
+  // 立即重评估整理槽。缺这个钩子时“不会立即重准入”的断言失去判别力（审查 Finding 1）。
+  let organizerRef: KnowledgeOrganizer | undefined
   const releaseSlot = vi.fn((sessionId: string) => {
     scheduler.release(sessionId)
     for (const item of scheduler.drainQueue()) queueStarted.push(item.queueItemId)
+    void organizerRef?.scheduleEvaluate().catch(() => undefined)
   })
 
   const sessionRoots = new Map<string, string>()
@@ -612,6 +616,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
     timeoutMs: () => options.timeoutMs ?? 600_000,
   }
   const organizer = createKnowledgeOrganizer(deps)
+  organizerRef = organizer
   activeOrganizers.push(organizer)
   return {
     root,
@@ -997,13 +1002,27 @@ describe('failure counting rules', () => {
         'organize_failed',
       ])
 
-      // 计次落盘失败后同一文档仍在待整理批次里:本轮不得立刻再烧一个模型回合,
-      // 也不得把全局名额留在占用状态(交给周期对账重试)。
+      // 计次落盘失败后同一文档仍在待整理批次里:名额释放触发的同名重评估
+      // (fake releaseSlot 已带生产钩子)必须被该库的退避挡住,而不是立刻再烧
+      // 一个模型回合;随后任意次外部 scheduleEvaluate 同样不得重准入。
+      expect(peekSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
       expect(harness.scheduler.activeTurnCount()).toBe(0)
       expect(harness.scheduler.activeSessionIds().has(kbOrganizeSessionId('kb1'))).toBe(false)
-      await new Promise(resolve => setTimeout(resolve, 100))
-      expect(peekSpy).toHaveBeenCalledTimes(1)
+      await harness.organizer.scheduleEvaluate()
+      await harness.organizer.scheduleEvaluate()
       expect(harness.createAgent).toHaveBeenCalledTimes(1)
+
+      // triggerManual 先清退避再评估;计次写恢复后本批按正常失败口径落盘。
+      failureSpy.mockRestore()
+      const retry = harness.organizer.triggerManual('kb1')
+      await waitForFollowup(harness, 1, 1)
+      resolveIdle(harness, 1)
+      await retry
+      expect(harness.createAgent).toHaveBeenCalledTimes(2)
+      expect(harness.host.attemptsFor('kb1', 'd1')).toMatchObject({
+        attempts: 1,
+        retryAfter: harness.clock.now + 60_000,
+      })
     } finally {
       warnSpy.mockRestore()
     }
@@ -1012,7 +1031,8 @@ describe('failure counting rules', () => {
   it('does not increment attempts for preempt, user-stop, maintenance, or dispose cancellations', async () => {
     const reasons = ['preempt', 'user-stop', 'maintenance', 'dispose'] as const
     for (const reason of reasons) {
-      const harness = createHarness()
+      // 手动整理的非自动库:取消后生产释放器重评估不会自动开下一批,隔离取消口径。
+      const harness = createHarness({ records: [makeRecord('kb1', '季度知识库', false)] })
       harness.host.setDocs('kb1', [{ docId: 'd1' }])
       const run = harness.organizer.triggerManual('kb1')
       await waitForFollowup(harness)
@@ -1294,7 +1314,8 @@ describe('events and phases', () => {
   })
 
   it('writes organize_cancelled for an external cancel and leaves the phase cleared', async () => {
-    const harness = createHarness()
+    // 手动整理的非自动库:取消后释放器重评估不产生下一批,相位保持 cleared。
+    const harness = createHarness({ records: [makeRecord('kb1', '季度知识库', false)] })
     harness.host.setDocs('kb1', [{ docId: 'd1' }])
     const run = harness.organizer.triggerManual('kb1')
     await waitForFollowup(harness)

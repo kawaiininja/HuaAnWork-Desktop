@@ -1389,3 +1389,61 @@ describe('index.ts knowledge effect wiring', () => {
     }
   }, 30_000)
 })
+
+// ---------------------------------------------------------------------------
+// 8. 计次写失败:生产释放重评估必须被该库退避挡住,手动恢复后继续整理
+// ---------------------------------------------------------------------------
+
+describe('failure-write rejection backs off the KB across production reevaluation', () => {
+  it('starts no immediate second Agent round after the settle and resumes on triggerManual', async () => {
+    let completeBatches = false
+    const firstBatchGate = deferred<void>()
+    const harness = await createHarness({
+      autoOrganize: true,
+      script: async (context) => {
+        // 第一个自动批次停在闸门后:等测试装好拒绝写的 spy 再结算。
+        await firstBatchGate.promise
+        // 第一批故意不写卡不 mark:模拟整理失败,结算时对全部文档计次。
+        if (completeBatches) await performBatch(context)
+        context.idle.resolve()
+      },
+    })
+    const failureSpy = harness.recordOrganizeFailureSpy as unknown as ReturnType<typeof vi.spyOn>
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      await harness.waitForAgent(1)
+      failureSpy.mockRejectedValue(new Error('SQLITE_FULL: database or disk is full'))
+      firstBatchGate.resolve()
+      await harness.organizer.waitForKbSlotIdle(harness.kbId)
+      expect(failureSpy).toHaveBeenCalled()
+      expect(harness.createAgent).toHaveBeenCalledTimes(1)
+
+      // 结算已发生、文档仍待整理:releaseSlot → releaseAndDrain → reevaluateKbOrganize
+      // 走的是真实生产接线,重评估必须被该库的进程内退避挡住;外部再评估同样不得
+      // 创建第二个 Agent,否则就是审查 Finding 1 的无限重准入。
+      await harness.organizer.scheduleEvaluate()
+      expect(harness.createAgent).toHaveBeenCalledTimes(1)
+      const pending = (await harness.host.listDocs(harness.kbId)).docs
+      expect(pending.length).toBeGreaterThan(0)
+      expect(pending.every(doc => doc.organizedSha256 !== doc.sha256)).toBe(true)
+      expect(harness.host.get(harness.kbId)?.phase).toBe('watching')
+
+      // 恢复计次写并手动触发:退避清除,下一批真正推进全部文档。
+      completeBatches = true
+      failureSpy.mockRestore()
+      warnSpy.mockRestore()
+      await harness.organizer.triggerManual(harness.kbId)
+      await vi.waitFor(
+        async () => {
+          const docs = (await harness.host.listDocs(harness.kbId)).docs
+          expect(docs.length).toBe(pending.length)
+          expect(docs.every(doc => doc.organizedSha256 === doc.sha256)).toBe(true)
+        },
+        { timeout: 15_000 },
+      )
+      expect(harness.createAgent).toHaveBeenCalledTimes(2)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  }, 30_000)
+})

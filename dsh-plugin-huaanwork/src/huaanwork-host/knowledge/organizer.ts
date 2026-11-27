@@ -4,8 +4,9 @@
  * 每个知识库固定一个 `huaanwork-kb-org-<kbId>` 槽：先做模型预检，再向
  * `TurnScheduler.admitKbOrganize` 申请唯一全局整理名额；准入后 open 唯一权威批次，
  * 补建 `wiki/` 根、登记会话根/工具白名单/模型并驱动真实 Agent 回合，回合结束在
- * `finally` 中按固定顺序 dispose、结算、清理并释放名额。纯墓碑批零进展只在这里的
- * 内存中做 1/5/3 退避，不扩 SQLite schema；文档级失败计次完全交给 Host/Storage。
+ * `finally` 中按固定顺序 dispose、结算、清理并释放名额。纯墓碑批零进展与失败计次
+ * 写不落盘共用这里的进程内 1/5/3 退避，不扩 SQLite schema；文档级失败计次完全
+ * 交给 Host/Storage。
  *
  * 本文件会在 Host 线程以 `.ts` 源码/构建产物两种形态加载，保持可擦除 TypeScript
  * 语法；纯类型导入必须写 `import type`，相对导入保留 `.ts` 后缀。
@@ -44,7 +45,7 @@ const WIKI_ROOT_UNWRITABLE = 'knowledge-organize-wiki-root-unwritable'
 const IDLE_TIMEOUT = 'knowledge-organize-idle-timeout'
 const UNMARKED = 'knowledge-organize-unmarked'
 
-/** 纯墓碑零进展的两次进程内重试间隔（第三次后停止自动重试）。 */
+/** 纯墓碑零进展或计次写失败后的两次进程内重试间隔（第三次后停止自动重试）。 */
 const TOMBSTONE_RETRY_FIRST_MS = 60_000
 const TOMBSTONE_RETRY_SECOND_MS = 300_000
 /** 写入失败错误文本的前端上限，避免把 bridge 原始多行文本写进文档行。 */
@@ -200,7 +201,7 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
   const activeAgentByKb = new Map<string, Agent>()
   /** 每库最近一次权威待整理签名；只有签名变化才复位纯墓碑零进展。 */
   const lastPendingSignatureByKb = new Map<string, string>()
-  /** 纯墓碑批零进展 1/5/3，仅进程内状态，不写 Storage。 */
+  /** 纯墓碑零进展与计次写失败共用的 1/5/3，仅进程内状态，不写 Storage。 */
   const zeroProgressByKb = new Map<string, ZeroProgressState>()
   /** 当前批次的看门狗；`noteSystemResume()` 只刷新它。 */
   let activeIdleDeadline: IdleDeadline | undefined
@@ -399,10 +400,10 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
         } catch (error) {
           // 单个文档计次失败不阻断其余文档与后续清理；但写侧持续失败（磁盘满/只读）
           // 时读侧仍返回同一批文档，立即续跑等于每轮白烧一个模型回合并绕过 1/5/3
-          // 退避，故本轮停止自动重试，交给周期对账或下一次手动触发，只告警一次。
+          // 退避，故对整库挂上与纯墓碑相同的进程内退避，只告警一次。
           if (!failureWriteFailed) {
             console.warn(
-              `[knowledge] organize failure write failed for ${kbId}; pausing auto-organize until the next evaluation: ${String(error)}`,
+              `[knowledge] organize failure write failed for ${kbId}; backing off auto-organize: ${String(error)}`,
             )
           }
           failureWriteFailed = true
@@ -451,8 +452,20 @@ export function createKnowledgeOrganizer(deps: KnowledgeOrganizerDeps): Knowledg
         }
       }
     }
-    // 计次未落盘时同一批文档会立刻被重新 peek，必须停止自动续跑（见上）。
-    if (failureWriteFailed) return { cancelled, scheduleNext: false }
+    // 计次未落盘时同一批文档会立刻被重新 peek：只停掉本轮续跑不够——名额释放器
+    // （生产的 releaseAndDrain）会在排空后立刻重评估，绕过只看本轮结果的就地抑制。
+    // 因此把抑制落到该库的进程内零进展退避上：60s → 300s → 第 3 次后停在
+    // isBackoffBlocked，直到权威签名变化或 triggerManual 清退避。
+    if (failureWriteFailed) {
+      const state = zeroProgressByKb.get(kbId) ?? { count: 0, timer: undefined }
+      state.count += 1
+      zeroProgressByKb.set(kbId, state)
+      return {
+        cancelled,
+        scheduleNext: false,
+        ...(state.count <= 2 ? { backoffCount: state.count } : {}),
+      }
+    }
     return { cancelled, scheduleNext: !cancelled }
   }
 
