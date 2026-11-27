@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "vitest";
@@ -474,6 +474,51 @@ test("organizer sessions cannot write through a dangling symlink that points out
       assert.equal(result.kind, "deny", `${name} ${mode} pre-execute`);
       assert.equal(typeof harness.guard(name, { path: linkName }), "string", `${name} ${mode} guard`);
     }
+  }
+});
+
+test("organizer sessions cannot write through a dangling directory symlink inside the knowledge root", async () => {
+  const { wiki } = createKnowledgeRoot();
+  const outside = makeTemp("huaanwork-kb-outside-dir-");
+  // 中间目录段是悬空符号链接(目标目录尚不存在):只对叶路径 lstat 会得 ENOENT 放行,
+  // resolveInside 的 existingParent 也会越过悬空段退回 wiki/ 而返回 allow,必须逐段 lstat 拦截。
+  symlinkSync(join(outside, "missing-dir"), join(wiki, "sub"), "dir");
+
+  const harness = createPolicyHarness({ sessionId: SESSION_ID, workspaceRoot: wiki });
+  for (const mode of MODES) {
+    harness.setMode(mode);
+    for (const name of ["write", "edit"]) {
+      const result = await harness.preExecute(name, { path: "sub/escape.md", content: "escape" });
+      assert.equal(result.kind, "deny", `${name} ${mode} pre-execute`);
+      assert.match(String(result.reason ?? ""), /符号链接/, `${name} ${mode} pre-execute reason`);
+      const guardReason = harness.guard(name, { path: "sub/escape.md" });
+      assert.match(String(guardReason ?? ""), /符号链接/, `${name} ${mode} guard reason`);
+    }
+  }
+});
+
+test("organizer temp directory check aligns canonical tmpdir aliases without false-denying inside-wiki writes", async () => {
+  const { wiki } = createKnowledgeRoot();
+  const realTmp = realpathSync(tmpdir());
+  const realWiki = realpathSync(wiki);
+
+  // 1) 通过规范化 tmpdir 路径(如 macOS /private/var/folders/...)写库外仍命中临时目录规则。
+  const rawHarness = createPolicyHarness({ sessionId: SESSION_ID, workspaceRoot: wiki });
+  const realTempTarget = join(realTmp, "huaanwork-kb-org-real-escape.md");
+  for (const name of ["write", "edit"]) {
+    const result = await rawHarness.preExecute(name, { path: realTempTarget, content: "escape" });
+    assert.equal(result.kind, "deny", `${name} canonical temp pre-execute`);
+    assert.match(String(result.reason ?? ""), /临时目录/, `${name} canonical temp pre-execute reason`);
+    assert.match(String(rawHarness.guard(name, { path: realTempTarget }) ?? ""), /临时目录/, `${name} canonical temp guard`);
+  }
+
+  // 2) 当库根已规范化为 realWiki、调用方传 raw tmpdir 前缀但实际落在库内时,不得被误判为临时目录越界。
+  const realHarness = createPolicyHarness({ sessionId: SESSION_ID, workspaceRoot: realWiki });
+  const insideViaRawAlias = join(wiki, "docs", "alias-ok.md");
+  for (const name of ["write", "edit"]) {
+    const result = await realHarness.preExecute(name, { path: insideViaRawAlias, content: "ok" });
+    assert.equal(result.kind, "allow", `${name} inside-wiki alias pre-execute`);
+    assert.equal(realHarness.guard(name, { path: insideViaRawAlias }), undefined, `${name} inside-wiki alias guard`);
   }
 });
 

@@ -1,6 +1,8 @@
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
 import { classifyShell } from "@huaanwork/policy/shell";
 
+import { noteKnowledgeOrganizerError } from "../huaanwork-host/knowledge/organizer-activity.ts";
+import { isKbOrganizeSessionId } from "../huaanwork-host/knowledge/session-ids.ts";
 import { skillKindOf } from "./skills.ts";
 
 export const name = "huaanwork-limits";
@@ -67,6 +69,12 @@ export function apply(ctx: Context): void {
 
   const emitStop = (agent: Agent | undefined, reason: string) => {
     const sessionId = sessionIdOfAgentRef(agent);
+    // 整理槽不向用户对话流广播 session/end;上游 agent.cancel({ kind: 'parent' }) 也不发
+    // agent/error,因此必须在此把中止原因交回整理错误观察器,避免丢失诊断原因或误结为成功。
+    if (isKbOrganizeSessionId(sessionId)) {
+      noteKnowledgeOrganizerError(sessionId, reason);
+      return;
+    }
     ctx.huaanworkEmit?.({
       event: "session/end",
       ok: false,

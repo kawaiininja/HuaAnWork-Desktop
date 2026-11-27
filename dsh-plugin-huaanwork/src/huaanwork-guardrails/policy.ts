@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { preExecuteExplained, type GuardMode, type ToolCall } from "@huaanwork/policy";
 import { sessionIdOfAgentRef } from "@huaanwork/policy/channels";
@@ -258,24 +258,79 @@ export function organizerWriteDenial(
   const sessionId = sessionIdOfAgentRef(execution.agent);
   if (!isKbOrganizeSessionId(sessionId)) return undefined;
   const root = sessionWorkspaceRoot(ctx, sessionId);
+  const rawTmp = tmpdir();
+  const realTmp = safeRealpath(rawTmp);
+  const normalizedRoot = safeRealpath(root) ?? normalizeTempAlias(resolve(root), rawTmp, realTmp);
   const args = objectArgs(execution.arguments);
   for (const key of WRITE_PATH_KEYS) {
     const candidate = args[key];
     if (typeof candidate !== "string" || candidate.length === 0) continue;
     const target = resolve(root, candidate);
-    if (isInsidePath(tmpdir(), target) && !isInsidePath(root, target)) return REASON_ORGANIZER_TEMP;
-    let stats: ReturnType<typeof lstatSync>;
-    try {
-      stats = lstatSync(target);
-    } catch (error) {
-      // ENOENT 表示"链接本身不存在"的新文件:继续走 decide.ts 的路径判定。
-      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") continue;
-      // 其余错误无法证明目标不是链接:fail closed。
-      return REASON_ORGANIZER_SYMLINK;
-    }
-    if (stats.isSymbolicLink()) return REASON_ORGANIZER_SYMLINK;
+    const normalizedTarget = normalizeTempAlias(target, rawTmp, realTmp);
+    // macOS 下 tmpdir() 为 /var/folders/... 而 realpath 为 /private/var/folders/...:
+    // 两侧同时按规范别名比对,既拦截规范临时路径越界,也不误伤落入规范库根内的合法写入。
+    const inTemp = isInsidePath(rawTmp, target) || (realTmp !== undefined && isInsidePath(realTmp, normalizedTarget));
+    const inRoot = isInsidePath(root, target) || isInsidePath(normalizedRoot, normalizedTarget);
+    if (inTemp && !inRoot) return REASON_ORGANIZER_TEMP;
+    // 对库内目标自库根向下逐段 lstat:同时拦截叶悬空链接与中间悬空目录链接(resolveInside
+    // 的 existingParent 会越过悬空目录段退回 wiki/),不检查库根之上的系统祖先链接。
+    const symlinkHit = isInsidePath(root, target)
+      ? hasSymlinkSegment(root, target)
+      : isInsidePath(normalizedRoot, normalizedTarget)
+        ? hasSymlinkSegment(normalizedRoot, normalizedTarget)
+        : isSymlinkOrUnreadable(target);
+    if (symlinkHit) return REASON_ORGANIZER_SYMLINK;
   }
   return undefined;
+}
+
+function safeRealpath(target: string): string | undefined {
+  try {
+    return realpathSync(target);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeTempAlias(candidate: string, rawTmp: string, realTmp: string | undefined): string {
+  if (realTmp === undefined || !isInsidePath(rawTmp, candidate)) return candidate;
+  const rel = relative(resolve(rawTmp), resolve(candidate));
+  return rel === "" ? realTmp : resolve(realTmp, rel);
+}
+
+function isSymlinkOrUnreadable(target: string): boolean {
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(target);
+  } catch (error) {
+    // ENOENT 表示"链接本身不存在"的新文件:继续走 decide.ts 的路径判定。
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+    // 其余错误无法证明目标不是链接:fail closed。
+    return true;
+  }
+  return stats.isSymbolicLink();
+}
+
+function hasSymlinkSegment(root: string, target: string): boolean {
+  const absRoot = resolve(root);
+  const absTarget = resolve(target);
+  const rel = relative(absRoot, absTarget);
+  if (rel === "") return isSymlinkOrUnreadable(absRoot);
+  if (rel.startsWith("..") || isAbsolute(rel)) return isSymlinkOrUnreadable(absTarget);
+  let current = absRoot;
+  for (const segment of rel.split(sep)) {
+    if (segment.length === 0) continue;
+    current = join(current, segment);
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return false;
+      return true;
+    }
+    if (stats.isSymbolicLink()) return true;
+  }
+  return false;
 }
 
 function isInsidePath(root: string, candidate: string): boolean {

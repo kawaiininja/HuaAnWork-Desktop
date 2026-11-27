@@ -24,6 +24,8 @@ import {
   type AttachmentMaps,
 } from '../../src/huaanwork-guardrails/agent-attachments.ts'
 import { apply as applyBridge } from '../../src/huaanwork-guardrails/bridge.ts'
+import { EXPERT_TEAM_DISPATCH_TOOL, makeExpertTeamClaimed } from '../../src/huaanwork-guardrails/expert-team-dispatch.ts'
+import { apply as applyLimits } from '../../src/huaanwork-guardrails/limits.ts'
 import { makeResultPresentClaimed, RESULT_PRESENT_TOOL } from '../../src/huaanwork-guardrails/result-artifact-tools.ts'
 import { apply as applySandbox, sessionWorkspaceRoot } from '../../src/huaanwork-guardrails/sandbox-cwd.ts'
 import { registerChildSession, resetChildSessionRegistry } from '../../src/huaanwork-host/child-sessions.ts'
@@ -275,6 +277,87 @@ test('turn anchor hooks skip organizer slots without occupying the 256-entry LRU
   expect(clearSpy).not.toHaveBeenCalled()
   disposed({ id: 's1' })
   expect(clearSpy).toHaveBeenCalledWith('s1')
+})
+
+test('agent/inbox/claimed handlers skip turnAnchors LRU writes for organizer slots while staying fail-closed on attachments', () => {
+  const store = createTurnAnchorStore({ limit: 2 })
+  store.notePreStep('s1', [userMessage('m1')], 't1')
+  const noteSpy = vi.spyOn(store, 'notePreStep')
+  const attachments = emptyAttachments()
+  attachAgentTools(attachments, ORG_SESSION, [RESULT_PRESENT_TOOL, EXPERT_TEAM_DISPATCH_TOOL])
+
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  try {
+    makeResultPresentClaimed({ huaanworkTurnAnchors: store, huaanworkAttachments: attachments })({
+      agent: { session: { id: ORG_SESSION } },
+      message: userMessage('org-claim-1'),
+      turn: 1,
+    } as never)
+    makeExpertTeamClaimed({ huaanworkTurnAnchors: store, huaanworkAttachments: attachments })({
+      agent: { session: { id: ORG_SESSION } },
+      message: userMessage('org-claim-1'),
+      turn: 1,
+    } as never)
+  } finally {
+    errorSpy.mockRestore()
+  }
+
+  // 两个 claimed 监听器都不得把整理槽写进 256 条 LRU（否则 session/disposed 跳过清理会导致永久占槽）。
+  expect(noteSpy.mock.calls.map((call) => call[0])).not.toContain(ORG_SESSION)
+  expect(store.current(ORG_SESSION)).toBeUndefined()
+  store.notePreStep('s2', [userMessage('m2')], 't2')
+  expect(store.current('s1')).toBeDefined()
+
+  // 附件仍保持 fail-closed 摘除。
+  expect(isAgentToolAttached(attachments, ORG_SESSION, RESULT_PRESENT_TOOL)).toBe(false)
+  expect(isAgentToolAttached(attachments, ORG_SESSION, EXPERT_TEAM_DISPATCH_TOOL)).toBe(false)
+})
+
+test('limits routes organizer repeated-failure stops to organizer error observer without emitting session/end', () => {
+  const emitted: Array<Record<string, unknown>> = []
+  const listeners: Record<string, Listener[]> = {}
+  applyLimits({
+    huaanworkEmit(event) {
+      emitted.push(event as Record<string, unknown>)
+    },
+    on(event, listener) {
+      ;(listeners[event] ??= []).push(listener as Listener)
+    },
+  })
+  const onToolResult = listeners['tools/result']?.[0] as unknown as (
+    execution: { name: string; arguments: unknown; agent: { session: { id: string }; cancel: (r: unknown) => void } },
+    result: { isError: boolean },
+  ) => void
+
+  const orgErrors: string[] = []
+  const disposeObserver = registerKnowledgeOrganizerActivity(ORG_SESSION, {
+    touch: () => undefined,
+    noteError: (message) => orgErrors.push(message),
+  })
+  const orgCancels: unknown[] = []
+  const orgAgent = { session: { id: ORG_SESSION }, cancel: (reason: unknown) => orgCancels.push(reason) }
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      onToolResult({ name: 'edit', arguments: { path: 'INDEX.md' }, agent: orgAgent }, { isError: true })
+    }
+  } finally {
+    disposeObserver()
+  }
+
+  expect(orgCancels).toEqual([{ kind: 'parent' }])
+  expect(emitted).toEqual([])
+  expect(orgErrors).toEqual(['same tool and key args failed 3 times'])
+
+  // 正对照:同一 limits 实例上普通用户会话仍正常广播 session/end。
+  const userCancels: unknown[] = []
+  const userAgent = { session: { id: 'huaanwork-user-1' }, cancel: (reason: unknown) => userCancels.push(reason) }
+  for (let i = 0; i < 3; i += 1) {
+    onToolResult({ name: 'edit', arguments: { path: 'a.md' }, agent: userAgent }, { isError: true })
+  }
+  expect(userCancels).toEqual([{ kind: 'parent' }])
+  expect(emitted).toEqual([
+    { event: 'session/end', ok: false, error: 'same tool and key args failed 3 times', sessionId: 'huaanwork-user-1' },
+  ])
 })
 
 // —— 列表可见性 ——
