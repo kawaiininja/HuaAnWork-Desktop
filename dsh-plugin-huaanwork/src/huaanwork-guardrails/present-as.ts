@@ -60,6 +60,15 @@ export type Context = { // 上游未导出;已逐字比对 0.1.6-alpha.2:core/to
   huaanworkAttachments?: AttachmentMaps;
   huaanworkUnattended?: { has(sessionId: string): boolean };
   huaanworkPackageChildAllow?: Map<string, readonly string[]>;
+  /**
+   * 按会话的显式工具白名单(知识库整理槽等)。有条目时可见集 = 条目 ∩
+   * (ALLOWED_TOOLS ∪ 附件);交集为空且 schema 已就绪时 `restrict({ allow: [] })`。
+   *
+   * 刻意不读 `huaanworkPackageChildAllow`(2026-11-27 owner 裁定 G-M1 方案一):
+   * 该表只保留 `hideSkill` 判定语义,包儿童收窄仍由 `skills.ts` 的
+   * `allow ∩ schemas` 完成,`@agent` 路径零改动。
+   */
+  huaanworkSessionToolAllow?: Map<string, readonly string[]>;
   huaanworkEmit?: (event: { event: "session/end"; ok: false; error: string; sessionId?: string }) => void;
   tools: {
     presentAs(mode: ToolPresentationMode): () => void;
@@ -146,14 +155,28 @@ export function apply(ctx: Context): void {
       ctx.huaanworkUnattended?.has(sessionId) === true
       || ((parentSessionOf(sessionId) !== undefined || headerParentId !== undefined) && ctx.huaanworkPackageChildAllow?.has(sessionId) !== true)
     );
-    const allowed = tools.schemas().flatMap((schema) => {
+    const schemas = tools.schemas();
+    const visible = schemas.flatMap((schema) => {
       const name = schema.name;
       if (!name) return [];
       if (name === "skill" && hideSkill) return [];
       if (ALLOWED_TOOLS.has(name) || extra?.has(name)) return [name];
       return [];
     });
-    if (allowed.length === 0) return;
+    // 会话级显式白名单:只与上面算出的可见集取交集,不看 `huaanworkPackageChildAllow`。
+    const sessionAllow = sessionId ? ctx.huaanworkSessionToolAllow?.get(sessionId) : undefined;
+    const allowed = sessionAllow === undefined
+      ? visible
+      : visible.filter((name) => sessionAllow.includes(name));
+    if (allowed.length === 0) {
+      // 老行为:没有显式白名单且交集为空(通常是 schema 还没注册)时不动。
+      if (sessionAllow === undefined) return;
+      // schema 尚未注册时交集必然为空,此刻锁死会让随后注册的合法工具全部不可见;
+      // 留待 `tools/change` 重放时再收窄。
+      if (schemas.length === 0) return;
+      // 有显式白名单、schema 已就绪、交集仍为空:必须 fail closed 成空集,
+      // 否则 restrict 被跳过就退化成"基线白名单全放行"(原 L156 的 fail-open)。
+    }
     let disposer: (() => void) | undefined;
     try {
       disposer = tools.restrict({ allow: allowed });

@@ -355,6 +355,21 @@ test("expert_team_dispatch allows when attached and denies when detached in both
   );
 });
 
+test("kb_org_* organizer tools allow only when attached and never ask", () => {
+  // 整理白名单工具没有审批界面:三档一致 `attached ? allow : deny`,绝不落到 ask,
+  // 否则整理槽会卡在没有人能应答的审批上。
+  for (const name of ["kb_org_get_delta", "kb_org_read_doc", "kb_org_mark_organized"]) {
+    const detached = { name, args: {}, workspaceRoot: ws };
+    const attached = { ...detached, attached: true };
+    for (const mode of ["ask", "smart", "full"] as const) {
+      assert.deepEqual(preExecuteExplained(detached, mode), { decision: "deny", reason: reasonToolUnattached(name) }, `${name} ${mode} detached`);
+      assert.deepEqual(guardExplained(detached, mode), { decision: "deny", reason: reasonToolUnattached(name) }, `${name} ${mode} guard detached`);
+      assert.deepEqual(preExecuteExplained(attached, mode), { decision: "allow" }, `${name} ${mode} attached`);
+      assert.deepEqual(guardExplained(attached, mode), { decision: "allow" }, `${name} ${mode} guard attached`);
+    }
+  }
+});
+
 test("agent_propose/agent_commit keep asking so the consent UI is not bypassed", () => {
   for (const name of ["agent_propose", "agent_commit"]) {
     const attached = { name, args: {}, workspaceRoot: ws, attached: true };
